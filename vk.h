@@ -208,7 +208,7 @@ typedef struct
     VkCommandPool one_time_gfx_pool;
     DeviceInfo    info;
 
-
+    VkPipelineCache pipeline_cache;
 } Renderer;
 
 #define MAX_VERTEX_ATTRS 8
@@ -358,7 +358,7 @@ static GraphicsPipelineConfig pipeline_config_default(void)
 }
 
 VkPipeline create_graphics_pipeline(Renderer* renderer, const GraphicsPipelineConfig* cfg);
-VkPipeline                  create_compute_pipeline(Renderer* renderer, const char* compute_path);
+VkPipeline create_compute_pipeline(Renderer* renderer, const char* compute_path);
 
 void vk_cmd_set_viewport_scissor(VkCommandBuffer cmd, VkExtent2D extent);
 

@@ -496,6 +496,174 @@ static bool device_has_extension(VkPhysicalDevice gpu, const char* ext)
     return found;
 }
 
+
+#ifndef PIPELINE_CACHE_MAGIC
+#define PIPELINE_CACHE_MAGIC 0xCAFEBABE
+#endif
+
+typedef struct PipelineCachePrefixHeader
+{
+    uint32_t magic;
+    uint32_t dataSize;
+    uint64_t dataHash;
+
+    uint32_t vendorID;
+    uint32_t deviceID;
+    uint32_t driverVersion;
+    uint32_t driverABI;
+
+    uint8_t uuid[VK_UUID_SIZE];
+} PipelineCachePrefixHeader;
+
+// very boring but reliable hash (FNV-1a)
+
+
+static int write_all(FILE* f, const void* data, size_t size)
+{
+    return fwrite(data, 1, size, f) == size;
+}
+
+static int read_all(FILE* f, void* data, size_t size)
+{
+    return fread(data, 1, size, f) == size;
+}
+
+static void get_device_props(VkPhysicalDevice phys, VkPhysicalDeviceProperties* out)
+{
+    vkGetPhysicalDeviceProperties(phys, out);
+}
+
+static int validate_header(const PipelineCachePrefixHeader* h, const VkPhysicalDeviceProperties* props)
+{
+    if(h->magic != PIPELINE_CACHE_MAGIC)
+        return 0;
+    if(h->driverABI != sizeof(void*))
+        return 0;
+    if(h->vendorID != props->vendorID)
+        return 0;
+    if(h->deviceID != props->deviceID)
+        return 0;
+    if(h->driverVersion != props->driverVersion)
+        return 0;
+    if(memcmp(h->uuid, props->pipelineCacheUUID, VK_UUID_SIZE) != 0)
+        return 0;
+    return 1;
+}
+
+VkPipelineCache pipeline_cache_load_or_create(VkDevice device, VkPhysicalDevice phys, const char* path)
+{
+    VkPhysicalDeviceProperties props;
+    get_device_props(phys, &props);
+
+    VkPipelineCache cache = VK_NULL_HANDLE;
+
+    FILE* f = fopen(path, "rb");
+    if(!f)
+    {
+        // file missing, build empty cache
+        VkPipelineCacheCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+        vkCreatePipelineCache(device, &ci, NULL, &cache);
+        return cache;
+    }
+
+    PipelineCachePrefixHeader hdr;
+    if(!read_all(f, &hdr, sizeof(hdr)))
+    {
+        fclose(f);
+        goto fallback;
+    }
+
+    if(!validate_header(&hdr, &props))
+    {
+        fclose(f);
+        goto fallback;
+    }
+
+    void* blob = malloc(hdr.dataSize);
+    if(!blob)
+    {
+        fclose(f);
+        goto fallback;
+    }
+
+    if(!read_all(f, blob, hdr.dataSize))
+    {
+        free(blob);
+        fclose(f);
+        goto fallback;
+    }
+
+    fclose(f);
+
+    if(hash64_bytes(blob, hdr.dataSize) != hdr.dataHash)
+    {
+        free(blob);
+        goto fallback;
+    }
+
+    VkPipelineCacheCreateInfo ci = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, .initialDataSize = hdr.dataSize, .pInitialData = blob};
+
+    VkResult res = vkCreatePipelineCache(device, &ci, NULL, &cache);
+    free(blob);
+
+    if(res != VK_SUCCESS)
+    {
+
+
+    fallback: {
+        VkPipelineCacheCreateInfo empty = {.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+
+        vkCreatePipelineCache(device, &empty, NULL, &cache);
+    }
+    }
+
+    return cache;
+}
+
+void pipeline_cache_save(VkDevice device, VkPhysicalDevice phys, VkPipelineCache cache, const char* path)
+{
+    size_t size = 0;
+    vkGetPipelineCacheData(device, cache, &size, NULL);
+    if(size == 0)
+        return;
+
+    void* blob = malloc(size);
+    if(!blob)
+        return;
+
+    vkGetPipelineCacheData(device, cache, &size, blob);
+
+    VkPhysicalDeviceProperties props;
+    get_device_props(phys, &props);
+
+    PipelineCachePrefixHeader hdr = {.magic         = PIPELINE_CACHE_MAGIC,
+                                     .dataSize      = (uint32_t)size,
+                                     .dataHash      = hash64_bytes(blob, size),
+                                     .vendorID      = props.vendorID,
+                                     .deviceID      = props.deviceID,
+                                     .driverVersion = props.driverVersion,
+                                     .driverABI     = sizeof(void*)};
+    memcpy(hdr.uuid, props.pipelineCacheUUID, VK_UUID_SIZE);
+
+    char tmp[1024];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+
+    FILE* f = fopen(tmp, "wb");
+    if(!f)
+    {
+        free(blob);
+        return;
+    }
+
+    write_all(f, &hdr, sizeof(hdr));
+    write_all(f, blob, size);
+    fclose(f);
+
+    rename(tmp, path);
+    free(blob);
+}
+
 void renderer_create(Renderer* r, RendererDesc* desc)
 {
 
@@ -788,8 +956,19 @@ void renderer_create(Renderer* r, RendererDesc* desc)
 
     descriptor_layout_cache_init(&r->descriptor_layout_cache);
     pipeline_layout_cache_init(&r->pipeline_layout_cache);
+    r->pipeline_cache = pipeline_cache_load_or_create(r->device, r->physical_device, "pipeline_cache.bin");
 }
 
+void renderer_destroy(Renderer* r)
+{
+    vkDeviceWaitIdle(r->device);
+
+    pipeline_cache_save(r->device, r->physical_device, r->pipeline_cache, "pipeline_cache.bin");
+
+    vkDestroyPipelineCache(r->device, r->pipeline_cache, NULL);
+
+    vkDestroyDevice(r->device, NULL);
+}
 
 VkSurfaceCapabilities2KHR query_surface_capabilities(VkPhysicalDevice gpu, VkSurfaceKHR surface)
 {
@@ -1597,7 +1776,7 @@ VkPipeline create_graphics_pipeline(Renderer* renderer, const GraphicsPipelineCo
 
     VkPipeline pipeline;
 
-    VkResult res = vkCreateGraphicsPipelines(renderer->device, VK_NULL_HANDLE, 1, &pipe, NULL, &pipeline);
+    VkResult res = vkCreateGraphicsPipelines(renderer->device, renderer->pipeline_cache, 1, &pipe, NULL, &pipeline);
 
     if(res != VK_SUCCESS)
     {
@@ -1661,7 +1840,7 @@ VkPipeline create_compute_pipeline(Renderer* renderer, const char* compute_path)
 
     VkPipeline pipeline;
 
-    VK_CHECK(vkCreateComputePipelines(renderer->device, VK_NULL_HANDLE, 1, &ci, NULL, &pipeline));
+    VK_CHECK(vkCreateComputePipelines(renderer->device, renderer->pipeline_cache, 1, &ci, NULL, &pipeline));
 
     vkDestroyShaderModule(renderer->device, module, NULL);
 
