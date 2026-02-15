@@ -769,6 +769,23 @@ void renderer_create(Renderer* r, RendererDesc* desc)
 
     vk_cmd_create_pool(r->device, r->graphics_queue_index, true, false, &r->one_time_gfx_pool);
 
+    int fb_w, fb_h;
+    glfwGetFramebufferSize(r->window, &fb_w, &fb_h);
+    FlowSwapchainCreateInfo sci = {.surface         = r->surface,
+                                   .width           = fb_w,
+                                   .height          = fb_h,
+                                   .min_image_count = 3,
+                                   .preferred_present_mode = vk_swapchain_select_present_mode(r->physical_device, r->surface, false),
+                                   //.preferred_present_mode = VK_PRESENT_MODE_IMMEDIATE_KHR,
+                                   .preferred_format      = VK_FORMAT_B8G8R8A8_UNORM,
+                                   .preferred_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
+                                   .extra_usage   = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
+                                   .old_swapchain = VK_NULL_HANDLE};
+
+
+    vk_create_swapchain(r->device, r->physical_device, &r->swapchain, &sci, r->graphics_queue, r->one_time_gfx_pool);
+
+
     descriptor_layout_cache_init(&r->descriptor_layout_cache);
     pipeline_layout_cache_init(&r->pipeline_layout_cache);
 }
@@ -1405,9 +1422,6 @@ static void reflect_spirv(const void* code, size_t size, VkShaderStageFlagBits s
 
 VkPipeline create_graphics_pipeline(Renderer* renderer, const GraphicsPipelineConfig* cfg)
 {
-    // ----------------------------
-    // Shader stages
-    // ----------------------------
     void*  vs_code = NULL;
     size_t vs_size = 0;
 
@@ -1424,9 +1438,6 @@ VkPipeline create_graphics_pipeline(Renderer* renderer, const GraphicsPipelineCo
 
     VkShaderModule fs = create_shader_module(renderer->device, fs_code, fs_size);
 
-    // ----------------------------
-    // Shader stages
-    // ----------------------------
 
     VkPipelineShaderStageCreateInfo stages[2] = {{
                                                      .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -1440,16 +1451,10 @@ VkPipeline create_graphics_pipeline(Renderer* renderer, const GraphicsPipelineCo
                                                      .module = fs,
                                                      .pName  = "main",
                                                  }};
-    // ----------------------------
-    // Vertex input
-    // ----------------------------
 
     VertexInputState vertex_input;
     vertex_input_build(cfg, &vertex_input);
 
-    // ----------------------------
-    // Input assembly
-    // ----------------------------
 
     VkPipelineInputAssemblyStateCreateInfo input_asm = {
         .sType                  = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
@@ -1457,9 +1462,6 @@ VkPipeline create_graphics_pipeline(Renderer* renderer, const GraphicsPipelineCo
         .primitiveRestartEnable = VK_FALSE,
     };
 
-    // ----------------------------
-    // Viewport/scissor (dynamic)
-    // ----------------------------
 
     VkPipelineViewportStateCreateInfo viewport = {
         .sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
@@ -1467,9 +1469,6 @@ VkPipeline create_graphics_pipeline(Renderer* renderer, const GraphicsPipelineCo
         .scissorCount  = 1,
     };
 
-    // ----------------------------
-    // Rasterizer
-    // ----------------------------
 
     VkPipelineRasterizationStateCreateInfo raster = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
@@ -1485,18 +1484,12 @@ VkPipeline create_graphics_pipeline(Renderer* renderer, const GraphicsPipelineCo
         .depthBiasEnable         = VK_FALSE,
     };
 
-    // ----------------------------
-    // Multisampling (disabled for now)
-    // ----------------------------
 
     VkPipelineMultisampleStateCreateInfo msaa = {
         .sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
         .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
     };
 
-    // ----------------------------
-    // Depth state
-    // ----------------------------
 
     VkPipelineDepthStencilStateCreateInfo depth = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
@@ -1509,9 +1502,6 @@ VkPipeline create_graphics_pipeline(Renderer* renderer, const GraphicsPipelineCo
         .stencilTestEnable     = VK_FALSE,
     };
 
-    // ----------------------------
-    // Blend state (per attachment)
-    // ----------------------------
 
     VkPipelineColorBlendAttachmentState blends[MAX_COLOR_ATTACHMENTS];
 
@@ -1554,9 +1544,6 @@ VkPipeline create_graphics_pipeline(Renderer* renderer, const GraphicsPipelineCo
         .pDynamicStates    = dyn_states,
     };
 
-    // ----------------------------
-    // Dynamic rendering info
-    // ----------------------------
 
     VkPipelineRenderingCreateInfo rendering = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
@@ -1568,9 +1555,6 @@ VkPipeline create_graphics_pipeline(Renderer* renderer, const GraphicsPipelineCo
         .stencilAttachmentFormat = VK_FORMAT_UNDEFINED,
     };
 
-    // ----------------------------
-    // Final pipeline create
-    // ----------------------------
 
     ReflectedShader refl = {0};
 
@@ -1627,6 +1611,62 @@ VkPipeline create_graphics_pipeline(Renderer* renderer, const GraphicsPipelineCo
     return pipeline;
 }
 
+VkPipeline create_compute_pipeline(Renderer* renderer, const char* compute_path)
+{
+
+    void*  code = NULL;
+    size_t size = 0;
+
+    if(!read_file(compute_path, &code, &size))
+        abort();
+
+    VkShaderModule module = create_shader_module(renderer->device, code, size);
+
+    ReflectedShader refl = {0};
+
+    reflect_spirv(code, size, VK_SHADER_STAGE_COMPUTE_BIT, &refl);
+
+    free(code);
+
+
+    const VkDescriptorSetLayoutBinding* set_bindings[VK_MAX_PIPELINE_SETS] = {0};
+
+    const VkDescriptorBindingFlags* set_flags[VK_MAX_PIPELINE_SETS] = {0};
+
+    for(uint32_t i = 0; i < refl.set_count; i++)
+    {
+        set_bindings[i] = refl.sets[i];
+        set_flags[i]    = refl.flags[i];
+    }
+
+
+    VkPipelineLayout layout =
+        pipeline_layout_cache_build(renderer->device, &renderer->descriptor_layout_cache,
+                                    &renderer->pipeline_layout_cache, set_bindings, refl.binding_counts,
+                                    refl.set_create_flags, set_flags, refl.set_count, refl.push_ranges, refl.push_count);
+
+
+    VkPipelineShaderStageCreateInfo stage = {
+        .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
+        .module = module,
+        .pName  = "main",
+    };
+
+    VkComputePipelineCreateInfo ci = {
+        .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .stage  = stage,
+        .layout = layout,
+    };
+
+    VkPipeline pipeline;
+
+    VK_CHECK(vkCreateComputePipelines(renderer->device, VK_NULL_HANDLE, 1, &ci, NULL, &pipeline));
+
+    vkDestroyShaderModule(renderer->device, module, NULL);
+
+    return pipeline;
+}
 
 void vk_cmd_set_viewport_scissor(VkCommandBuffer cmd, VkExtent2D extent)
 {

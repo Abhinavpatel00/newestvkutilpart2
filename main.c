@@ -29,8 +29,6 @@ int main()
     // ============================================================
     // Instance / Device setup
     // ============================================================
-
-
     VK_CHECK(volkInitialize());
 
     if(!is_instance_extension_supported("VK_KHR_wayland_surface"))
@@ -68,41 +66,13 @@ int main()
     Renderer renderer = {0};
     renderer_create(&renderer, &desc);
 
-    int fb_w, fb_h;
-    glfwGetFramebufferSize(renderer.window, &fb_w, &fb_h);
-    FlowSwapchainCreateInfo sci = {.surface         = renderer.surface,
-                                   .width           = fb_w,
-                                   .height          = fb_h,
-                                   .min_image_count = 3,
-                                   .preferred_present_mode =
-                                       vk_swapchain_select_present_mode(renderer.physical_device, renderer.surface, false),
-                                   //.preferred_present_mode = VK_PRESENT_MODE_IMMEDIATE_KHR,
-                                   .preferred_format      = VK_FORMAT_B8G8R8A8_UNORM,
-                                   .preferred_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
-                                   .extra_usage   = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
-                                   .old_swapchain = VK_NULL_HANDLE};
-
-
-    vk_create_swapchain(renderer.device, renderer.physical_device, &renderer.swapchain, &sci, renderer.graphics_queue,
-                        renderer.one_time_gfx_pool);
-
-
-    VkFormat color_fmt = renderer.swapchain.format;
-
+  
     GraphicsPipelineConfig cfg = pipeline_config_default();
-
-
     cfg.vert_path              = "compiledshaders/triangle.vert.spv";
     cfg.frag_path              = "compiledshaders/triangle.frag.spv";
     cfg.color_attachment_count = 1;
-    cfg.color_formats          = &color_fmt;
-
-    cfg.depth_format = VK_FORMAT_UNDEFINED;
-
-    cfg.use_vertex_input = false;
-
-    cfg.blends[0]           = blend_disabled();
-    VkPipeline trianglepipe = create_graphics_pipeline(&renderer, &cfg);
+    cfg.color_formats          = &renderer.swapchain.format;
+    VkPipeline trianglepipe    = create_graphics_pipeline(&renderer, &cfg);
 
     while(!glfwWindowShouldClose(renderer.window))
     {

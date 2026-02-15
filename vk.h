@@ -280,7 +280,6 @@ typedef struct GraphicsPipelineConfig
     VertexBinding vertex_binding;
 
 } GraphicsPipelineConfig;
-
 static ColorAttachmentBlend blend_alpha(void)
 {
     return (ColorAttachmentBlend){
@@ -359,7 +358,7 @@ static GraphicsPipelineConfig pipeline_config_default(void)
 }
 
 VkPipeline create_graphics_pipeline(Renderer* renderer, const GraphicsPipelineConfig* cfg);
-
+VkPipeline                  create_compute_pipeline(Renderer* renderer, const char* compute_path);
 
 void vk_cmd_set_viewport_scissor(VkCommandBuffer cmd, VkExtent2D extent);
 
