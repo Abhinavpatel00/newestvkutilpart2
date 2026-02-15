@@ -2,10 +2,8 @@
 #include "tinytypes.h"
 #include <errno.h>
 #include <stdbool.h>
-#include <stdint.h>
 #include <vulkan/vulkan_core.h>
 
-#include "external/SPIRV-Reflect/spirv_reflect.h"
 
 #define DEBUG
 
@@ -16,7 +14,7 @@ bool is_instance_extension_supported(const char* extension_name)
     VkExtensionProperties* extensions = malloc(extensionCount * sizeof(VkExtensionProperties));
     vkEnumerateInstanceExtensionProperties(NULL, &extensionCount, extensions);
 
-    forEach(i, extensionCount)
+    for(uint32_t i = 0; i < extensionCount; i++)
     {
         if(strcmp(extension_name, extensions[i].extensionName) == 0)
         {
@@ -116,7 +114,7 @@ static uint32_t score_physical_device(VkPhysicalDevice gpu, VkSurfaceKHR surface
     vkGetPhysicalDeviceQueueFamilyProperties(gpu, &queue_count, qprops);
 
     VkBool32 can_present = VK_FALSE;
-    forEach(i, queue_count)
+    for(uint32_t i = 0; i < queue_count; i++)
     {
         VkBool32 present = VK_FALSE;
         vkGetPhysicalDeviceSurfaceSupportKHR(gpu, i, surface, &present);
@@ -418,7 +416,7 @@ void find_queue_families(VkPhysicalDevice device, VkSurfaceKHR surface, queue_fa
 
     vkGetPhysicalDeviceQueueFamilyProperties(device, &count, families);
 
-    forEach(i, count)
+    for(uint32_t i = 0; i < count; i++)
     {
         const VkQueueFamilyProperties* f = &families[i];
 
@@ -483,7 +481,7 @@ static bool device_has_extension(VkPhysicalDevice gpu, const char* ext)
     vkEnumerateDeviceExtensionProperties(gpu, NULL, &count, props);
 
     bool found = false;
-    forEach(i, count)
+    for(uint32_t i = 0; i < count; i++)
     {
         if(strcmp(props[i].extensionName, ext) == 0)
         {
@@ -507,6 +505,7 @@ void renderer_create(Renderer* r, RendererDesc* desc)
     // Queues
     // Frame contexts
 
+    memset(r, 0, sizeof(*r));
     {
 
 
@@ -563,7 +562,8 @@ void renderer_create(Renderer* r, RendererDesc* desc)
         if(layer_count > 0)
         {
             log_info("[instance] layers: %u", layer_count);
-            forEach(i, layer_count) log_info("[instance]  layer[%u]=%s", i, layers[i]);
+            for(uint32_t i = 0; i < layer_count; i++)
+                log_info("[instance]  layer[%u]=%s", i, layers[i]);
         }
         VkInstanceCreateInfo ci = {.sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
                                    .pApplicationInfo        = &app,
@@ -693,7 +693,7 @@ void renderer_create(Renderer* r, RendererDesc* desc)
 
         VkDeviceQueueCreateInfo queues[4];
 
-        forEach(i, count)
+        for(uint32_t i = 0; i < count; i++)
         {
             queues[i] = (VkDeviceQueueCreateInfo){.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
 
@@ -707,7 +707,7 @@ void renderer_create(Renderer* r, RendererDesc* desc)
         const char* extensions[32];
         uint32_t    ext_count = 0;
 
-        forEach(i, desc->device_extension_count)
+        for(uint32_t i = 0; i < desc->device_extension_count; i++)
         {
             extensions[ext_count++] = desc->device_extensions[i];
         }
@@ -751,7 +751,7 @@ void renderer_create(Renderer* r, RendererDesc* desc)
     //
     // 8. Create Frame Contexts
     //
-    forEach(i, MAX_FRAMES_IN_FLIGHT)
+    for(uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
     {
         FrameContext* f = &r->frames[i];
         vk_cmd_create_pool(r->device, r->graphics_queue_index, true, false, &f->cmdbufpool);
@@ -768,9 +768,6 @@ void renderer_create(Renderer* r, RendererDesc* desc)
 
 
     vk_cmd_create_pool(r->device, r->graphics_queue_index, true, false, &r->one_time_gfx_pool);
-
-    descriptor_layout_cache_init(&r->descriptor_layout_cache);
-    pipeline_layout_cache_init(&r->pipeline_layout_cache);
 }
 
 
@@ -812,7 +809,9 @@ VkSurfaceFormatKHR select_surface_format(VkPhysicalDevice gpu, VkSurfaceKHR surf
 
     vkGetPhysicalDeviceSurfaceFormatsKHR(gpu, surface, &count, formats);
 
-    forEach(i, count) if(formats[i].format == preferred && formats[i].colorSpace == preferred_cs) return formats[i];
+    for(uint32_t i = 0; i < count; ++i)
+        if(formats[i].format == preferred && formats[i].colorSpace == preferred_cs)
+            return formats[i];
 
     return formats[0];
 }
@@ -902,55 +901,50 @@ void vk_create_swapchain(VkDevice                       device,
         VkImageViewCreateInfo view_ci = VK_IMAGE_VIEW_DEFAULT(out_swapchain->images[i], out_swapchain->format);
         VK_CHECK(vkCreateImageView(device, &view_ci, NULL, &out_swapchain->image_views[i]));
     }
-    //
-    // // Optional: transition all swapchain images UNDEFINED -> PRESENT
-    // {
-    //     VkCommandBuffer cmd = begin_one_time_cmd(device, one_time_pool);
-    //
-    //     forEach(i, out_swapchain->image_count)
-    //     {
-    //         VkImageMemoryBarrier2 barrier = {
-    //             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-    //
-    //             .srcStageMask  = VK_PIPELINE_STAGE_2_NONE,
-    //             .srcAccessMask = 0,
-    //
-    //             .dstStageMask  = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
-    //             .dstAccessMask = 0,
-    //
-    //             .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-    //             .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-    //
-    //             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-    //             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-    //
-    //             .image = out_swapchain->images[i],
-    //
-    //             .subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
-    //             .subresourceRange.baseMipLevel   = 0,
-    //             .subresourceRange.levelCount     = 1,
-    //             .subresourceRange.baseArrayLayer = 0,
-    //             .subresourceRange.layerCount     = 1,
-    //         };
-    //
-    //         VkDependencyInfo dep = {
-    //             .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-    //
-    //             .imageMemoryBarrierCount = 1,
-    //             .pImageMemoryBarriers    = &barrier,
-    //         };
-    //
-    //         vkCmdPipelineBarrier2(cmd, &dep);
-    //     }
-    //
-    //     end_one_time_cmd(device, graphics_queue, one_time_pool, cmd);
-    // }
 
-    forEach(i, out_swapchain->image_count)
+    // Optional: transition all swapchain images UNDEFINED -> PRESENT
     {
-        out_swapchain->states[i] =
-            (ImageState){.layout = VK_IMAGE_LAYOUT_UNDEFINED, .stage = VK_PIPELINE_STAGE_2_NONE, .access = 0, .validity = IMAGE_STATE_UNDEFINED};
+        VkCommandBuffer cmd = begin_one_time_cmd(device, one_time_pool);
+
+        forEach(i, out_swapchain->image_count)
+        {
+            VkImageMemoryBarrier2 barrier = {
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+
+                .srcStageMask  = VK_PIPELINE_STAGE_2_NONE,
+                .srcAccessMask = 0,
+
+                .dstStageMask  = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
+                .dstAccessMask = 0,
+
+                .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+
+                .image = out_swapchain->images[i],
+
+                .subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
+                .subresourceRange.baseMipLevel   = 0,
+                .subresourceRange.levelCount     = 1,
+                .subresourceRange.baseArrayLayer = 0,
+                .subresourceRange.layerCount     = 1,
+            };
+
+            VkDependencyInfo dep = {
+                .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+
+                .imageMemoryBarrierCount = 1,
+                .pImageMemoryBarriers    = &barrier,
+            };
+
+            vkCmdPipelineBarrier2(cmd, &dep);
+        }
+
+        end_one_time_cmd(device, graphics_queue, one_time_pool, cmd);
     }
+
     vk_create_semaphores(device, out_swapchain->image_count, out_swapchain->render_finished);
 }
 
@@ -1091,6 +1085,29 @@ void vk_swapchain_recreate(VkDevice device, VkPhysicalDevice gpu, FlowSwapchain*
 }
 
 
+#define MAX_VERTEX_ATTRS 8
+typedef enum VertexFormat
+{
+    FMT_FLOAT,
+    FMT_VEC2,
+    FMT_VEC3,
+    FMT_VEC4,
+} VertexFormat;
+
+typedef struct VertexAttr
+{
+    uint8_t      location;
+    VertexFormat format;
+} VertexAttr;
+
+typedef struct VertexBinding
+{
+    uint16_t   stride;
+    uint8_t    input_rate;  // VK_VERTEX_INPUT_RATE_VERTEX / INSTANCE
+    uint8_t    attr_count;
+    VertexAttr attrs[MAX_VERTEX_ATTRS];
+} VertexBinding;
+
 // ============================================================
 // Vertex format helpers
 // ============================================================
@@ -1164,6 +1181,103 @@ typedef struct VertexInputState
 // ============================================================
 
 
+#define MAX_COLOR_ATTACHMENTS 8
+
+typedef struct ColorAttachmentBlend
+{
+    bool blend_enable;
+
+    VkBlendFactor src_color;
+    VkBlendFactor dst_color;
+    VkBlendOp     color_op;
+
+    VkBlendFactor src_alpha;
+    VkBlendFactor dst_alpha;
+    VkBlendOp     alpha_op;
+
+    VkColorComponentFlags write_mask;
+
+} ColorAttachmentBlend;
+
+
+static ColorAttachmentBlend blend_alpha(void)
+{
+    return (ColorAttachmentBlend){
+        .blend_enable = true,
+
+        .src_color = VK_BLEND_FACTOR_SRC_ALPHA,
+        .dst_color = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .color_op  = VK_BLEND_OP_ADD,
+
+        .src_alpha = VK_BLEND_FACTOR_ONE,
+        .dst_alpha = VK_BLEND_FACTOR_ZERO,
+        .alpha_op  = VK_BLEND_OP_ADD,
+
+        .write_mask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+}
+
+static ColorAttachmentBlend blend_additive(void)
+{
+    return (ColorAttachmentBlend){
+        .blend_enable = true,
+
+        .src_color = VK_BLEND_FACTOR_ONE,
+        .dst_color = VK_BLEND_FACTOR_ONE,
+        .color_op  = VK_BLEND_OP_ADD,
+
+        .src_alpha = VK_BLEND_FACTOR_ONE,
+        .dst_alpha = VK_BLEND_FACTOR_ONE,
+        .alpha_op  = VK_BLEND_OP_ADD,
+
+        .write_mask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+}
+
+
+static ColorAttachmentBlend blend_disabled(void)
+{
+    return (ColorAttachmentBlend){
+        .blend_enable = false,
+
+        .src_color = VK_BLEND_FACTOR_ONE,
+        .dst_color = VK_BLEND_FACTOR_ZERO,
+        .color_op  = VK_BLEND_OP_ADD,
+
+        .src_alpha = VK_BLEND_FACTOR_ONE,
+        .dst_alpha = VK_BLEND_FACTOR_ZERO,
+        .alpha_op  = VK_BLEND_OP_ADD,
+
+        .write_mask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+}
+typedef struct GraphicsPipelineConfig
+{
+    // Rasterization
+    //
+    const char*     vert_path;
+    const char*     frag_path;
+    VkCullModeFlags cull_mode;
+    VkFrontFace     front_face;
+    VkPolygonMode   polygon_mode;
+
+    VkPrimitiveTopology topology;
+
+    bool        depth_test_enable;
+    bool        depth_write_enable;
+    VkCompareOp depth_compare_op;
+
+    uint32_t        color_attachment_count;
+    const VkFormat* color_formats;
+    VkFormat        depth_format;
+
+    // Per-attachment blend state
+    ColorAttachmentBlend blends[MAX_COLOR_ATTACHMENTS];
+    // Vertex input (optional)
+    bool          use_vertex_input;
+    VertexBinding vertex_binding;
+
+} GraphicsPipelineConfig;
 static void vertex_input_build(const GraphicsPipelineConfig* config, VertexInputState* out)
 {
     memset(out, 0, sizeof(*out));
@@ -1241,7 +1355,31 @@ static void vertex_input_build(const GraphicsPipelineConfig* config, VertexInput
 
     out->create_info.pVertexAttributeDescriptions = out->attributes;
 }
+static GraphicsPipelineConfig pipeline_config_default(void)
+{
+    GraphicsPipelineConfig cfg = {0};
 
+    cfg.cull_mode    = VK_CULL_MODE_BACK_BIT;
+    cfg.front_face   = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    cfg.polygon_mode = VK_POLYGON_MODE_FILL;
+
+    cfg.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    cfg.depth_test_enable  = true;
+    cfg.depth_write_enable = true;
+    cfg.depth_compare_op   = VK_COMPARE_OP_LESS_OR_EQUAL;
+
+    cfg.color_attachment_count = 0;
+    cfg.color_formats          = NULL;
+    cfg.depth_format           = VK_FORMAT_UNDEFINED;
+
+    for(uint32_t i = 0; i < MAX_COLOR_ATTACHMENTS; i++)
+        cfg.blends[i] = blend_disabled();
+
+    cfg.use_vertex_input = false;
+
+    return cfg;
+}
 
 static void pipeline_config_validate(const GraphicsPipelineConfig* cfg)
 {
@@ -1316,94 +1454,7 @@ static VkShaderModule create_shader_module(VkDevice device, const void* code, si
     VK_CHECK(vkCreateShaderModule(device, &ci, NULL, &mod));
     return mod;
 }
-
-
-typedef struct ReflectedShader
-{
-    VkDescriptorSetLayoutBinding sets[VK_MAX_PIPELINE_SETS][MAX_BINDINGS_PER_SET];
-    VkDescriptorBindingFlags     flags[VK_MAX_PIPELINE_SETS][MAX_BINDINGS_PER_SET];
-
-    uint32_t binding_counts[VK_MAX_PIPELINE_SETS];
-
-    VkDescriptorSetLayoutCreateFlags set_create_flags[VK_MAX_PIPELINE_SETS];
-
-    uint32_t set_count;
-
-    VkPushConstantRange push_ranges[VK_MAX_PUSH_RANGES];
-    uint32_t            push_count;
-
-} ReflectedShader;
-
-
-static void reflect_spirv(const void* code, size_t size, VkShaderStageFlagBits stage, ReflectedShader* out)
-{
-    SpvReflectShaderModule module;
-
-    SpvReflectResult res = spvReflectCreateShaderModule(size, code, &module);
-
-    assert(res == SPV_REFLECT_RESULT_SUCCESS);
-
-    uint32_t set_count = 0;
-    spvReflectEnumerateDescriptorSets(&module, &set_count, NULL);
-
-    SpvReflectDescriptorSet* sets[VK_MAX_PIPELINE_SETS];
-
-    spvReflectEnumerateDescriptorSets(&module, &set_count, sets);
-
-    forEach(s, set_count)
-    {
-        SpvReflectDescriptorSet* set = sets[s];
-
-        uint32_t set_index = set->set;
-
-        if(set_index >= out->set_count)
-            out->set_count = set_index + 1;
-
-        out->set_create_flags[set_index] = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
-
-        forEach(b, set->binding_count)
-        {
-            SpvReflectDescriptorBinding* refl = set->bindings[b];
-
-            uint32_t idx = out->binding_counts[set_index]++;
-
-            VkDescriptorSetLayoutBinding* dst = &out->sets[set_index][idx];
-
-            dst->binding        = refl->binding;
-            dst->descriptorType = (VkDescriptorType)refl->descriptor_type;
-
-            dst->descriptorCount = refl->count;
-
-            dst->stageFlags |= stage;
-
-            out->flags[set_index][idx] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
-        }
-    }
-
-    // Push constants
-
-    uint32_t push_count = 0;
-
-    spvReflectEnumeratePushConstantBlocks(&module, &push_count, NULL);
-
-    SpvReflectBlockVariable* pushes[VK_MAX_PUSH_RANGES];
-
-    spvReflectEnumeratePushConstantBlocks(&module, &push_count, pushes);
-
-    forEach(i, push_count)
-    {
-        out->push_ranges[out->push_count++] = (VkPushConstantRange){
-            .offset     = pushes[i]->offset,
-            .size       = pushes[i]->size,
-            .stageFlags = stage,
-        };
-    }
-
-    spvReflectDestroyShaderModule(&module);
-}
-
-
-VkPipeline create_graphics_pipeline(Renderer* renderer, const GraphicsPipelineConfig* cfg)
+static VkPipeline create_graphics_pipeline(VkDevice device, const GraphicsPipelineConfig* cfg)
 {
     // ----------------------------
     // Shader stages
@@ -1420,9 +1471,12 @@ VkPipeline create_graphics_pipeline(Renderer* renderer, const GraphicsPipelineCo
     if(!read_file(cfg->frag_path, &fs_code, &fs_size))
         abort();
 
-    VkShaderModule vs = create_shader_module(renderer->device, vs_code, vs_size);
+    VkShaderModule vs = create_shader_module(device, vs_code, vs_size);
 
-    VkShaderModule fs = create_shader_module(renderer->device, fs_code, fs_size);
+    VkShaderModule fs = create_shader_module(device, fs_code, fs_size);
+
+    free(vs_code);
+    free(fs_code);
 
     // ----------------------------
     // Shader stages
@@ -1432,13 +1486,13 @@ VkPipeline create_graphics_pipeline(Renderer* renderer, const GraphicsPipelineCo
                                                      .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                                                      .stage  = VK_SHADER_STAGE_VERTEX_BIT,
                                                      .module = vs,
-                                                     .pName  = "main",
+                                                     .pName  = "vs_main",
                                                  },
                                                  {
                                                      .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                                                      .stage  = VK_SHADER_STAGE_FRAGMENT_BIT,
                                                      .module = fs,
-                                                     .pName  = "main",
+                                                     .pName  = "fs_main",
                                                  }};
     // ----------------------------
     // Vertex input
@@ -1515,7 +1569,7 @@ VkPipeline create_graphics_pipeline(Renderer* renderer, const GraphicsPipelineCo
 
     VkPipelineColorBlendAttachmentState blends[MAX_COLOR_ATTACHMENTS];
 
-    forEach(i, cfg->color_attachment_count)
+    for(uint32_t i = 0; i < cfg->color_attachment_count; i++)
     {
         const ColorAttachmentBlend*          src = &cfg->blends[i];
         VkPipelineColorBlendAttachmentState* dst = &blends[i];
@@ -1572,21 +1626,6 @@ VkPipeline create_graphics_pipeline(Renderer* renderer, const GraphicsPipelineCo
     // Final pipeline create
     // ----------------------------
 
-    ReflectedShader refl = {0};
-
-    reflect_spirv(vs_code, vs_size, VK_SHADER_STAGE_VERTEX_BIT, &refl);
-
-    reflect_spirv(fs_code, fs_size, VK_SHADER_STAGE_FRAGMENT_BIT, &refl);
-
-
-    const VkDescriptorSetLayoutBinding* set_bindings[VK_MAX_PIPELINE_SETS];
-    const VkDescriptorBindingFlags*     set_flags[VK_MAX_PIPELINE_SETS];
-
-    for(uint32_t i = 0; i < refl.set_count; i++)
-    {
-        set_bindings[i] = refl.sets[i];
-        set_flags[i]    = refl.flags[i];
-    }
     VkGraphicsPipelineCreateInfo pipe = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
 
@@ -1604,149 +1643,20 @@ VkPipeline create_graphics_pipeline(Renderer* renderer, const GraphicsPipelineCo
         .pColorBlendState    = &blend_state,
         .pDynamicState       = &dyn,
 
-        .layout = pipeline_layout_cache_build(renderer->device, &renderer->descriptor_layout_cache, &renderer->pipeline_layout_cache,
-                                              set_bindings, refl.binding_counts, refl.set_create_flags, set_flags,
-                                              refl.set_count, refl.push_ranges, refl.push_count),
+        .layout     = layout,
         .renderPass = VK_NULL_HANDLE,
         .subpass    = 0,
     };
 
     VkPipeline pipeline;
 
-    VkResult res = vkCreateGraphicsPipelines(renderer->device, VK_NULL_HANDLE, 1, &pipe, NULL, &pipeline);
+    VkResult res = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipe, NULL, &pipeline);
 
     if(res != VK_SUCCESS)
     {
         fprintf(stderr, "Failed to create graphics pipeline\n");
         abort();
     }
-    free(vs_code);
-    free(fs_code);
-
 
     return pipeline;
-}
-
-
-void vk_cmd_set_viewport_scissor(VkCommandBuffer cmd, VkExtent2D extent)
-{
-    VkViewport vp = {
-        .x        = 0.0f,
-        .y        = 0.0f,
-        .width    = (float)extent.width,
-        .height   = (float)extent.height,
-        .minDepth = 0.0f,
-        .maxDepth = 1.0f,
-    };
-    VkRect2D sc = {
-        .offset = {0, 0},
-        .extent = extent,
-    };
-    vkCmdSetViewport(cmd, 0, 1, &vp);
-    vkCmdSetScissor(cmd, 0, 1, &sc);
-}
-
-
-void image_transition(VkCommandBuffer cmd, Image* img, VkImageLayout new_layout, VkPipelineStageFlags2 new_stage, VkAccessFlags2 new_access)
-{
-    assert(img);
-    assert(img->image != VK_NULL_HANDLE);
-
-    ImageState* state = &img->state;
-
-    if(state->validity == IMAGE_STATE_UNDEFINED)
-    {
-        state->layout       = VK_IMAGE_LAYOUT_UNDEFINED;
-        state->stage        = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
-        state->access       = 0;
-        state->queue_family = VK_QUEUE_FAMILY_IGNORED;
-        state->validity     = IMAGE_STATE_VALID;
-    }
-
-    if(state->layout == new_layout && state->stage == new_stage && state->access == new_access)
-    {
-        return;
-    }
-
-    VkImageAspectFlags aspect = (img->format == VK_FORMAT_D32_SFLOAT || img->format == VK_FORMAT_D24_UNORM_S8_UINT) ?
-                                    VK_IMAGE_ASPECT_DEPTH_BIT :
-                                    VK_IMAGE_ASPECT_COLOR_BIT;
-
-    VkImageMemoryBarrier2 barrier = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-
-                                     .srcStageMask  = state->stage,
-                                     .srcAccessMask = state->access,
-
-                                     .dstStageMask  = new_stage,
-                                     .dstAccessMask = new_access,
-
-                                     .oldLayout = state->layout,
-                                     .newLayout = new_layout,
-
-                                     .srcQueueFamilyIndex = state->queue_family,
-                                     .dstQueueFamilyIndex = state->queue_family,
-
-                                     .image = img->image,
-
-                                     .subresourceRange = {.aspectMask     = aspect,
-                                                          .baseMipLevel   = 0,
-                                                          .levelCount     = img->mipLevels,
-                                                          .baseArrayLayer = 0,
-                                                          .layerCount     = img->arrayLayers}};
-
-    VkDependencyInfo dep = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier};
-
-    vkCmdPipelineBarrier2(cmd, &dep);
-
-    state->layout = new_layout;
-    state->stage  = new_stage;
-    state->access = new_access;
-}
-
-void image_transition_swapchain(VkCommandBuffer cmd, FlowSwapchain* sc, VkImageLayout new_layout, VkPipelineStageFlags2 dst_stage, VkAccessFlags2 dst_access)
-{
-    uint32_t index = sc->current_image;
-
-    ImageState* state = &sc->states[index];
-
-    VkPipelineStageFlags2 src_stage;
-    VkAccessFlags2        src_access;
-    if(state->validity == IMAGE_STATE_UNDEFINED)
-    {
-        src_stage  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-        src_access = 0;
-    }
-    else
-    {
-        src_stage  = state->stage;
-        src_access = state->access;
-    }
-    VkImageMemoryBarrier2 barrier = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-
-        .srcStageMask  = src_stage,
-        .srcAccessMask = src_access,
-
-        .dstStageMask  = dst_stage,
-        .dstAccessMask = dst_access,
-
-        .oldLayout = state->layout,
-        .newLayout = new_layout,
-
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-
-        .image = sc->images[index],
-
-        .subresourceRange = {
-            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1}};
-
-    VkDependencyInfo dep = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier};
-
-    vkCmdPipelineBarrier2(cmd, &dep);
-
-    state->layout   = new_layout;
-    state->stage    = dst_stage;
-    state->access   = dst_access;
-    state->validity = IMAGE_STATE_VALID;
 }

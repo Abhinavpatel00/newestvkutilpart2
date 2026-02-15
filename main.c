@@ -1,6 +1,9 @@
+#include "tinytypes.h"
 #include "vk_default.h"
 #include "vk.h"
 #include <GLFW/glfw3.h>
+#include <stdbool.h>
+#include <vulkan/vulkan_core.h>
 
 
 // Renderer
@@ -83,6 +86,24 @@ int main()
     vk_create_swapchain(renderer.device, renderer.physical_device, &renderer.swapchain, &sci, renderer.graphics_queue,
                         renderer.one_time_gfx_pool);
 
+
+    VkFormat color_fmt = renderer.swapchain.format;
+
+    GraphicsPipelineConfig cfg = pipeline_config_default();
+
+
+    cfg.vert_path              = "compiledshaders/triangle.vert.spv";
+    cfg.frag_path              = "compiledshaders/triangle.frag.spv";
+    cfg.color_attachment_count = 1;
+    cfg.color_formats          = &color_fmt;
+
+    cfg.depth_format = VK_FORMAT_UNDEFINED;
+
+    cfg.use_vertex_input = false;
+
+    cfg.blends[0]           = blend_disabled();
+    VkPipeline trianglepipe = create_graphics_pipeline(&renderer, &cfg);
+
     while(!glfwWindowShouldClose(renderer.window))
     {
         glfwPollEvents();
@@ -100,20 +121,59 @@ int main()
         if(renderer.swapchain.needs_recreate)
         {
             vkDeviceWaitIdle(renderer.device);
-
-
             vk_swapchain_recreate(renderer.device, renderer.physical_device, &renderer.swapchain, fb_w, fb_h,
                                   renderer.graphics_queue, renderer.one_time_gfx_pool);
             g_framebuffer_resized             = false;
             renderer.swapchain.needs_recreate = false;
             continue;  // restart frame cleanly
         }
+
         vkWaitForFences(renderer.device, 1, &renderer.frames[renderer.current_frame].in_flight_fence, VK_TRUE, UINT64_MAX);
         vkResetFences(renderer.device, 1, &renderer.frames[renderer.current_frame].in_flight_fence);
 
-
+        /* reset EVERYTHING allocated for this frame */
+        vkResetCommandPool(renderer.device, renderer.frames[renderer.current_frame].cmdbufpool, 0);
         vk_swapchain_acquire(renderer.device, &renderer.swapchain,
                              renderer.frames[renderer.current_frame].image_available_semaphore, VK_NULL_HANDLE, UINT64_MAX);
+
+        vk_cmd_begin(renderer.frames[renderer.current_frame].cmdbuf, true);
+        image_transition_swapchain(renderer.frames[renderer.current_frame].cmdbuf, &renderer.swapchain,
+                                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                   VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        VkRenderingAttachmentInfo color = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                                           .imageView = renderer.swapchain.image_views[renderer.swapchain.current_image],
+                                           .imageLayout = renderer.swapchain.states[renderer.swapchain.current_image].layout,
+                                           .loadOp  = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                                           .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+
+                                           .clearValue.color = {{0.1f, 0.1f, 0.1f, 1.0f}}};
+
+
+        VkRenderingInfo rendering = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+
+                                     .renderArea.extent = renderer.swapchain.extent,
+
+                                     .layerCount = 1,
+
+                                     .colorAttachmentCount = 1,
+                                     .pColorAttachments    = &color};
+        vkCmdBeginRendering(renderer.frames[renderer.current_frame].cmdbuf, &rendering);
+
+
+        vkCmdBindPipeline(renderer.frames[renderer.current_frame].cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, trianglepipe);
+        vk_cmd_set_viewport_scissor(renderer.frames[renderer.current_frame].cmdbuf, renderer.swapchain.extent);
+        vkCmdDraw(renderer.frames[renderer.current_frame].cmdbuf, 3, 1, 0, 0);
+        vkCmdEndRendering(renderer.frames[renderer.current_frame].cmdbuf);
+
+
+        image_transition_swapchain(renderer.frames[renderer.current_frame].cmdbuf, &renderer.swapchain,
+                                   VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0);
+        vk_cmd_end(renderer.frames[renderer.current_frame].cmdbuf);
+
+        VkCommandBufferSubmitInfo cmd_info = {
+            .sType         = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+            .commandBuffer = renderer.frames[renderer.current_frame].cmdbuf,
+        };
         VkSemaphoreSubmitInfo wait_info = {
             .sType       = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
             .semaphore   = renderer.frames[renderer.current_frame].image_available_semaphore,
@@ -133,12 +193,10 @@ int main()
         VkSubmitInfo2 submit = {
             .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
 
-            .waitSemaphoreInfoCount = 1,
-            .pWaitSemaphoreInfos    = &wait_info,
-
-            .commandBufferInfoCount = 0,
-            .pCommandBufferInfos    = NULL,
-
+            .waitSemaphoreInfoCount   = 1,
+            .pWaitSemaphoreInfos      = &wait_info,
+            .commandBufferInfoCount   = 1,
+            .pCommandBufferInfos      = &cmd_info,
             .signalSemaphoreInfoCount = 1,
             .pSignalSemaphoreInfos    = &signal_info,
         };
