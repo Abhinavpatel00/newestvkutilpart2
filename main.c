@@ -52,7 +52,7 @@
 //   Bindful is object-oriented thinking. “Each draw has its state.”
 //Bindless is data-oriented thinking. “All resources live in big tables.”
 //
-//     
+//
 // set 0 binding 0: texture2D images[100000]
 // set 0 binding 1: sampler samplers[32]
 // set 0 binding 2: buffer storageBuffers[100000]
@@ -63,9 +63,6 @@
 // set 0 binding 7: buffer materials[100000]
 // set 0 binding 8: buffer transforms[100000]
 //
-
-
-
 
 
 #define VALIDATION true
@@ -160,24 +157,29 @@ int main()
                              renderer.frames[renderer.current_frame].image_available_semaphore, VK_NULL_HANDLE, UINT64_MAX);
 
         vk_cmd_begin(renderer.frames[renderer.current_frame].cmdbuf, true);
+        vkCmdBindDescriptorSets(renderer.frames[renderer.current_frame].cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                renderer.bindless_system.pipeline_layout, 0, 1, &renderer.bindless_system.set, 0, NULL);
+        vkCmdBindDescriptorSets(renderer.frames[renderer.current_frame].cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                renderer.bindless_system.pipeline_layout, 0, 1, &renderer.bindless_system.set, 0, NULL);
         image_transition_swapchain(renderer.frames[renderer.current_frame].cmdbuf, &renderer.swapchain,
                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
 
-	VkRenderingAttachmentInfo color = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+
+        VkRenderingAttachmentInfo color = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
                                            .imageView = renderer.swapchain.image_views[renderer.swapchain.current_image],
                                            .imageLayout = renderer.swapchain.states[renderer.swapchain.current_image].layout,
-                                           .loadOp  = VK_ATTACHMENT_LOAD_OP_CLEAR,
-                                           .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                                           .loadOp           = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                                           .storeOp          = VK_ATTACHMENT_STORE_OP_STORE,
                                            .clearValue.color = {{0.1f, 0.1f, 0.1f, 1.0f}}};
 
-	VkRenderingInfo rendering = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-                                     .renderArea.extent = renderer.swapchain.extent,
-                                     .layerCount = 1,
+        VkRenderingInfo rendering = {.sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
+                                     .renderArea.extent    = renderer.swapchain.extent,
+                                     .layerCount           = 1,
                                      .colorAttachmentCount = 1,
                                      .pColorAttachments    = &color};
 
-	vkCmdBeginRendering(renderer.frames[renderer.current_frame].cmdbuf, &rendering);
+        vkCmdBeginRendering(renderer.frames[renderer.current_frame].cmdbuf, &rendering);
         vkCmdBindPipeline(renderer.frames[renderer.current_frame].cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, trianglepipe);
         vk_cmd_set_viewport_scissor(renderer.frames[renderer.current_frame].cmdbuf, renderer.swapchain.extent);
         vkCmdDraw(renderer.frames[renderer.current_frame].cmdbuf, 3, 1, 0, 0);
@@ -209,7 +211,7 @@ int main()
         };
 
         VkSubmitInfo2 submit = {
-            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+            .sType                    = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
             .waitSemaphoreInfoCount   = 1,
             .pWaitSemaphoreInfos      = &wait_info,
             .commandBufferInfoCount   = 1,
