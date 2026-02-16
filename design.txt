@@ -1,0 +1,56 @@
+
+renderer_create
+    create bindless layout
+    create bindless pool
+    allocate bindless set
+    create global pipeline layout
+
+create pipelines using global layout
+
+per frame:
+    bind descriptor set ONCE
+
+per draw:
+    push constants
+    bind pipeline
+    draw
+
+GPU pulls everything
+
+
+maxPushConstantsSize = 256 bytes
+That’s the Vulkan-guaranteed fast path. This memory lives in register space or extremely fast constant cache, not VRAM.
+
+When you call:
+
+vkCmdPushConstants(cmd, layout, stageFlags, 0, 256, data);
+This does NOT:
+
+• allocate memory
+• touch VRAM
+• stall GPU
+• use descriptor memory
+
+It just copies 256 bytes into command buffer state.
+
+This is basically free.
+
+ven 10,000 draws per frame is fine
+
+Worst case math:
+
+256 bytes × 10,000 draws = 2.5 MB per frame
+
+
+At 60 FPS:
+
+2.5 MB × 60 = 150 MB/sec
+
+
+Modern CPUs handle 30–50 GB/sec memory bandwidth.
+
+This is nothing.
+
+
+then we dont neeeed pipeline cache and descriptor cache fucck yyaaaaaaaaaaaaaaaaaaahhhhhhhhhhhhhhhhhhhhhhhh
+

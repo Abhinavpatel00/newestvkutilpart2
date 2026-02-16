@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <vulkan/vulkan_core.h>
-
+//   https://github.com/ericherman/libfastset/tree/master/src
 #include "external/SPIRV-Reflect/spirv_reflect.h"
 
 #define DEBUG
@@ -954,9 +954,155 @@ void renderer_create(Renderer* r, RendererDesc* desc)
     vk_create_swapchain(r->device, r->physical_device, &r->swapchain, &sci, r->graphics_queue, r->one_time_gfx_pool);
 
 
-    descriptor_layout_cache_init(&r->descriptor_layout_cache);
-    pipeline_layout_cache_init(&r->pipeline_layout_cache);
+    //  descriptor_layout_cache_init(&r->descriptor_layout_cache);
+    //pipeline_layout_cache_init(&r->pipeline_layout_cache);
     r->pipeline_cache = pipeline_cache_load_or_create(r->device, r->physical_device, "pipeline_cache.bin");
+
+
+    VkDescriptorSetLayoutBinding bindings[] = {
+        // binding 0: textures
+        {
+            .binding         = 0,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+            .descriptorCount = MAX_BINDLESS_TEXTURES,
+            .stageFlags      = VK_SHADER_STAGE_ALL,
+        },
+
+        // binding 1: samplers
+        {
+            .binding         = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLER,
+            .descriptorCount = MAX_BINDLESS_SAMPLERS,
+            .stageFlags      = VK_SHADER_STAGE_ALL,
+        },
+
+        // binding 2: storage buffers
+        {
+            .binding         = 2,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = MAX_BINDLESS_STORAGE_BUFFERS,
+            .stageFlags      = VK_SHADER_STAGE_ALL,
+        },
+
+        // binding 3: uniform buffers
+        {
+            .binding         = 3,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = MAX_BINDLESS_UNIFORM_BUFFERS,
+            .stageFlags      = VK_SHADER_STAGE_ALL,
+        },
+
+        // binding 4: storage images
+        {
+            .binding         = 4,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            .descriptorCount = MAX_BINDLESS_STORAGE_IMAGES,
+            .stageFlags      = VK_SHADER_STAGE_ALL,
+        },
+
+        // binding 5: vertex buffers
+        {
+            .binding         = 5,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = MAX_BINDLESS_VERTEX_BUFFERS,
+            .stageFlags      = VK_SHADER_STAGE_ALL,
+        },
+
+        // binding 6: index buffers
+        {
+            .binding         = 6,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = MAX_BINDLESS_INDEX_BUFFERS,
+            .stageFlags      = VK_SHADER_STAGE_ALL,
+        },
+
+        // binding 7: materials
+        {
+            .binding         = 7,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = MAX_BINDLESS_MATERIALS,
+            .stageFlags      = VK_SHADER_STAGE_ALL,
+        },
+
+        // binding 8: transforms
+        {
+            .binding         = 8,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = MAX_BINDLESS_TRANSFORMS,
+            .stageFlags      = VK_SHADER_STAGE_ALL,
+        },
+    };
+
+    VkDescriptorBindingFlags flags[ARRAY_COUNT(bindings)];
+
+    forEach(i, ARRAY_COUNT(flags))
+    {
+        flags[i] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT
+                   | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT;
+    }
+
+    VkDescriptorSetLayoutBindingFlagsCreateInfo ext = {
+        .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
+        .bindingCount  = ARRAY_COUNT(flags),
+        .pBindingFlags = flags,
+    };
+
+    VkDescriptorSetLayoutCreateInfo ci = {
+        .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .pNext        = &ext,
+        .bindingCount = ARRAY_COUNT(bindings),
+        .pBindings    = bindings,
+        .flags        = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT,
+    };
+
+    vkCreateDescriptorSetLayout(r->device, &ci, NULL, &r->bindless_system.set_layout);
+
+
+    VkDescriptorPoolSize sizes[] = {
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, MAX_BINDLESS_TEXTURES},
+        {VK_DESCRIPTOR_TYPE_SAMPLER, MAX_BINDLESS_SAMPLERS},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MAX_BINDLESS_STORAGE_BUFFERS + MAX_BINDLESS_VERTEX_BUFFERS + MAX_BINDLESS_INDEX_BUFFERS
+                                                + MAX_BINDLESS_MATERIALS + MAX_BINDLESS_TRANSFORMS},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, MAX_BINDLESS_UNIFORM_BUFFERS},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, MAX_BINDLESS_STORAGE_IMAGES},
+    };
+
+    VkDescriptorPoolCreateInfo cib = {
+        .sType   = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .flags   = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
+        .maxSets = 1,
+        .poolSizeCount = ARRAY_COUNT(sizes),
+        .pPoolSizes    = sizes,
+    };
+
+    vkCreateDescriptorPool(r->device, &cib, NULL, &r->bindless_system.pool);
+
+    VkDescriptorSetAllocateInfo ai = {
+        .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool     = r->bindless_system.pool,
+        .descriptorSetCount = 1,
+        .pSetLayouts        = &r->bindless_system.set_layout,
+    };
+
+    vkAllocateDescriptorSets(r->device, &ai, &r->bindless_system.set);
+
+    VkPushConstantRange push_range = {
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
+
+        .offset = 0,
+        .size   = 256  // your device limit
+    };
+
+    VkPipelineLayoutCreateInfo playoutci = {
+        .sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 1,
+        .pSetLayouts    = &r->bindless_system.set_layout,
+
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges    = &push_range,
+    };
+
+    VK_CHECK(vkCreatePipelineLayout(r->device, &playoutci, NULL, &r->bindless_system.pipeline_layout));
 }
 
 void renderer_destroy(Renderer* r)
@@ -1766,10 +1912,12 @@ VkPipeline create_graphics_pipeline(Renderer* renderer, const GraphicsPipelineCo
         .pDepthStencilState  = &depth,
         .pColorBlendState    = &blend_state,
         .pDynamicState       = &dyn,
+        //
+        // .layout = pipeline_layout_cache_build(renderer->device, &renderer->descriptor_layout_cache, &renderer->pipeline_layout_cache,
+        //                                       set_bindings, refl.binding_counts, refl.set_create_flags, set_flags,
+        //                                       refl.set_count, refl.push_ranges, refl.push_count),
 
-        .layout = pipeline_layout_cache_build(renderer->device, &renderer->descriptor_layout_cache, &renderer->pipeline_layout_cache,
-                                              set_bindings, refl.binding_counts, refl.set_create_flags, set_flags,
-                                              refl.set_count, refl.push_ranges, refl.push_count),
+        .layout     = renderer->bindless_system.pipeline_layout,
         .renderPass = VK_NULL_HANDLE,
         .subpass    = 0,
     };
@@ -1818,19 +1966,20 @@ VkPipeline create_compute_pipeline(Renderer* renderer, const char* compute_path)
         set_flags[i]    = refl.flags[i];
     }
 
+    //
+    // VkPipelineLayout layout =
+    //     pipeline_layout_cache_build(renderer->device, &renderer->descriptor_layout_cache,
+    //                                 &renderer->pipeline_layout_cache, set_bindings, refl.binding_counts,
+    //                                 refl.set_create_flags, set_flags, refl.set_count, refl.push_ranges, refl.push_count);
 
-    VkPipelineLayout layout =
-        pipeline_layout_cache_build(renderer->device, &renderer->descriptor_layout_cache,
-                                    &renderer->pipeline_layout_cache, set_bindings, refl.binding_counts,
-                                    refl.set_create_flags, set_flags, refl.set_count, refl.push_ranges, refl.push_count);
+    VkPipelineLayout layout = renderer->bindless_system.pipeline_layout;
 
-
-    VkPipelineShaderStageCreateInfo stage = {
-        .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
-        .module = module,
-        .pName  = "main",
-    };
+                     VkPipelineShaderStageCreateInfo stage = {
+                         .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                         .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
+                         .module = module,
+                         .pName  = "main",
+                     };
 
     VkComputePipelineCreateInfo ci = {
         .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,

@@ -15,6 +15,59 @@
 //     ├── DescriptorAllocator (per-frame)
 //     ├── PipelineCacheManager
 
+
+//so here is a cool pipeline storing idea
+//
+//     typedef enum PipelineID
+//     {
+//     PIPELINE_TRIANGLE,
+//     PIPELINE_GBUFFER,
+//     PIPELINE_LIGHTING,
+//     PIPELINE_COMPOSITE,
+//
+//     PIPELINE_COUNT
+// } PipelineID;
+// Store:
+//
+// typedef struct Renderer
+// {
+//     VkPipeline pipelines[PIPELINE_COUNT];
+// } Renderer;
+// Use:
+//
+// renderer.pipelines[PIPELINE_TRIANGLE] =
+//     create_graphics_pipeline(...);
+//
+// vkCmdBindPipeline(cmd,
+//     VK_PIPELINE_BIND_POINT_GRAPHICS,
+//     renderer.pipelines[PIPELINE_TRIANGLE]);
+//
+//
+//
+//
+
+//i think we can only make one single indless gloal desc layout so we have to ind only that and we are free from managing desc per oject
+
+// but because of different needs of push constants we might or might not maintain just one global pipeline layout
+//   Bindful is object-oriented thinking. “Each draw has its state.”
+//Bindless is data-oriented thinking. “All resources live in big tables.”
+//
+//     
+// set 0 binding 0: texture2D images[100000]
+// set 0 binding 1: sampler samplers[32]
+// set 0 binding 2: buffer storageBuffers[100000]
+// set 0 binding 3: buffer uniformBuffers[10000]
+// set 0 binding 4: image2D storageImages[10000]
+// set 0 binding 5: buffer vertexBuffers[100000]
+// set 0 binding 6: buffer indexBuffers[100000]
+// set 0 binding 7: buffer materials[100000]
+// set 0 binding 8: buffer transforms[100000]
+//
+
+
+
+
+
 #define VALIDATION true
 static bool g_framebuffer_resized = false;
 static void framebuffer_resize_callback(GLFWwindow* window, int width, int height)
@@ -66,7 +119,7 @@ int main()
     Renderer renderer = {0};
     renderer_create(&renderer, &desc);
 
-  
+
     GraphicsPipelineConfig cfg = pipeline_config_default();
     cfg.vert_path              = "compiledshaders/triangle.vert.spv";
     cfg.frag_path              = "compiledshaders/triangle.frag.spv";
@@ -110,26 +163,21 @@ int main()
         image_transition_swapchain(renderer.frames[renderer.current_frame].cmdbuf, &renderer.swapchain,
                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-        VkRenderingAttachmentInfo color = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+
+	VkRenderingAttachmentInfo color = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
                                            .imageView = renderer.swapchain.image_views[renderer.swapchain.current_image],
                                            .imageLayout = renderer.swapchain.states[renderer.swapchain.current_image].layout,
                                            .loadOp  = VK_ATTACHMENT_LOAD_OP_CLEAR,
                                            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-
                                            .clearValue.color = {{0.1f, 0.1f, 0.1f, 1.0f}}};
 
-
-        VkRenderingInfo rendering = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-
+	VkRenderingInfo rendering = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
                                      .renderArea.extent = renderer.swapchain.extent,
-
                                      .layerCount = 1,
-
                                      .colorAttachmentCount = 1,
                                      .pColorAttachments    = &color};
-        vkCmdBeginRendering(renderer.frames[renderer.current_frame].cmdbuf, &rendering);
 
-
+	vkCmdBeginRendering(renderer.frames[renderer.current_frame].cmdbuf, &rendering);
         vkCmdBindPipeline(renderer.frames[renderer.current_frame].cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, trianglepipe);
         vk_cmd_set_viewport_scissor(renderer.frames[renderer.current_frame].cmdbuf, renderer.swapchain.extent);
         vkCmdDraw(renderer.frames[renderer.current_frame].cmdbuf, 3, 1, 0, 0);
@@ -162,7 +210,6 @@ int main()
 
         VkSubmitInfo2 submit = {
             .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
-
             .waitSemaphoreInfoCount   = 1,
             .pWaitSemaphoreInfos      = &wait_info,
             .commandBufferInfoCount   = 1,

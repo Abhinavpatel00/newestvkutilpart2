@@ -117,7 +117,7 @@ typedef struct Image
     VmaAllocation allocation;
 
     VkImageUsageFlags usage;
-    VkImageView       view;
+    VkImageView       image_view;
     VkSampler         sampler;
 
     ImageState state;
@@ -174,6 +174,25 @@ typedef struct
     VkFence         in_flight_fence;
 } FrameContext;
 
+#pragma once
+
+#define MAX_BINDLESS_TEXTURES 65536
+#define MAX_BINDLESS_SAMPLERS 256
+#define MAX_BINDLESS_STORAGE_BUFFERS 65536
+#define MAX_BINDLESS_UNIFORM_BUFFERS 16384
+#define MAX_BINDLESS_STORAGE_IMAGES 16384
+#define MAX_BINDLESS_VERTEX_BUFFERS 65536
+#define MAX_BINDLESS_INDEX_BUFFERS 65536
+#define MAX_BINDLESS_MATERIALS 65536
+#define MAX_BINDLESS_TRANSFORMS 65536
+
+typedef struct Bindless
+{
+    VkDescriptorSetLayout set_layout;
+    VkDescriptorPool      pool;
+    VkDescriptorSet       set;
+    VkPipelineLayout pipeline_layout;
+} Bindless;
 #define MAX_FRAMES_IN_FLIGHT 3
 typedef struct
 {
@@ -200,15 +219,17 @@ typedef struct
     GLFWwindow*   window;
     FrameContext  frames[MAX_FRAMES_IN_FLIGHT];
     uint32_t      current_frame;
-
-    DescriptorLayoutCache descriptor_layout_cache;
-    PipelineLayoutCache   pipeline_layout_cache;
-
+    //
+    // DescriptorLayoutCache descriptor_layout_cache;
+    // PipelineLayoutCache   pipeline_layout_cache;
+    Bindless              bindless_system;
 
     VkCommandPool one_time_gfx_pool;
     DeviceInfo    info;
 
     VkPipelineCache pipeline_cache;
+
+    Image depth;
 } Renderer;
 
 #define MAX_VERTEX_ATTRS 8
