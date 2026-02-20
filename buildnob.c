@@ -17,8 +17,7 @@ int main(int argc, char** argv)
 
         "-std=gnu99",
         "-ggdb",
-        "-fno-common",
-
+        "-DDEBUG",
 
     };
 
@@ -33,7 +32,7 @@ int main(int argc, char** argv)
         "-Iexternal/cimgui/imgui/backends",
     };
 
-    const char* c_sources[] = {"main.c", "ext.c", "vk.c", "helpers.c","cachestuff.c"};
+    const char* c_sources[] = {"main.c", "ext.c", "vk.c", "helpers.c", "cachestuff.c"};
 
     const char* cpp_sources[] = {
         "vma.cpp",

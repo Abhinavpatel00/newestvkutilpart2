@@ -7,7 +7,6 @@
 //   https://github.com/ericherman/libfastset/tree/master/src
 #include "external/SPIRV-Reflect/spirv_reflect.h"
 
-#define DEBUG
 
 bool is_instance_extension_supported(const char* extension_name)
 {
@@ -26,6 +25,26 @@ bool is_instance_extension_supported(const char* extension_name)
     }
 
     free(extensions);
+    return false;
+}
+
+bool is_instance_layer_supported(const char* layer_name)
+{
+    uint32_t layer_count = 0;
+    vkEnumerateInstanceLayerProperties(&layer_count, NULL);
+    VkLayerProperties* layers = malloc(layer_count * sizeof(VkLayerProperties));
+    vkEnumerateInstanceLayerProperties(&layer_count, layers);
+
+    forEach(i, layer_count)
+    {
+        if(strcmp(layer_name, layers[i].layerName) == 0)
+        {
+            free(layers);
+            return true;
+        }
+    }
+
+    free(layers);
     return false;
 }
 static VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT      severity,
@@ -663,7 +682,26 @@ void pipeline_cache_save(VkDevice device, VkPhysicalDevice phys, VkPipelineCache
     rename(tmp, path);
     free(blob);
 }
+static VkFormat pick_depth_format(VkPhysicalDevice gpu)
+{
+    VkFormat candidates[] = {
+        VK_FORMAT_D32_SFLOAT,
+        VK_FORMAT_D24_UNORM_S8_UINT,
+        VK_FORMAT_D32_SFLOAT_S8_UINT,
+    };
 
+    for(uint32_t i = 0; i < ARRAY_COUNT(candidates); i++)
+    {
+        VkFormat           fmt = candidates[i];
+        VkFormatProperties props;
+        vkGetPhysicalDeviceFormatProperties(gpu, fmt, &props);
+
+        if(props.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)
+            return fmt;
+    }
+
+    return VK_FORMAT_UNDEFINED;
+}
 void renderer_create(Renderer* r, RendererDesc* desc)
 {
 
@@ -700,6 +738,10 @@ void renderer_create(Renderer* r, RendererDesc* desc)
 
         if(desc->enable_validation)
         {
+            if(!is_instance_extension_supported(VK_EXT_DEBUG_UTILS_EXTENSION_NAME))
+            {
+                log_warn("[instance] %s not supported by loader", VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+            }
             extensions[ext_count++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
         }
 
@@ -712,6 +754,10 @@ void renderer_create(Renderer* r, RendererDesc* desc)
         }
         if(desc->enable_validation)
         {
+            if(!is_instance_layer_supported("VK_LAYER_KHRONOS_validation"))
+            {
+                log_warn("[instance] VK_LAYER_KHRONOS_validation not present");
+            }
             layers[layer_count++] = "VK_LAYER_KHRONOS_validation";
         }
 
@@ -748,7 +794,7 @@ void renderer_create(Renderer* r, RendererDesc* desc)
             validation_features.pNext = ci.pNext;
             ci.pNext                  = &validation_features;
         }
-        VK_CHECK(vkCreateInstance(&ci, r->instance.allocator, &r->instance.instance));
+        VK_CHECK(vkCreateInstance(&ci, r->instance.allocatorcallbacks, &r->instance.instance));
         volkLoadInstance(r->instance.instance);
         log_info("[renderer] instance created");
     }
@@ -776,9 +822,29 @@ void renderer_create(Renderer* r, RendererDesc* desc)
 
             if(fn)
             {
-                fn(r->instance.instance, &ci, r->instance.allocator, &r->instance.debug_messenger);
+                fn(r->instance.instance, &ci, r->instance.allocatorcallbacks, &r->instance.debug_messenger);
 
                 log_info("[renderer] debug messenger created");
+
+                PFN_vkSubmitDebugUtilsMessageEXT submit =
+                    (void*)vkGetInstanceProcAddr(r->instance.instance, "vkSubmitDebugUtilsMessageEXT");
+                if(submit)
+                {
+                    VkDebugUtilsMessengerCallbackDataEXT data = {
+                        .sType    = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CALLBACK_DATA_EXT,
+                        .pMessage = "Validation is enabled and debug messenger is active",
+                    };
+                    submit(r->instance.instance, VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT,
+                           VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT, &data);
+                }
+                else
+                {
+                    log_warn("[renderer] vkSubmitDebugUtilsMessageEXT not available");
+                }
+            }
+            else
+            {
+                log_warn("[renderer] vkCreateDebugUtilsMessengerEXT not available");
             }
         }
 #endif
@@ -897,7 +963,7 @@ void renderer_create(Renderer* r, RendererDesc* desc)
 
                                  .ppEnabledExtensionNames = extensions};
 
-        VK_CHECK(vkCreateDevice(r->physical_device, &ci, r->allocator, &r->device));
+        VK_CHECK(vkCreateDevice(r->physical_device, &ci, r->allocatorcallbacks, &r->device));
 
         volkLoadDevice(r->device);
         log_info("[renderer] logical device created");
@@ -943,13 +1009,22 @@ void renderer_create(Renderer* r, RendererDesc* desc)
                                    .width           = fb_w,
                                    .height          = fb_h,
                                    .min_image_count = 3,
-                                   .preferred_present_mode = vk_swapchain_select_present_mode(r->physical_device, r->surface, false),
-                                   //.preferred_present_mode = VK_PRESENT_MODE_IMMEDIATE_KHR,
-                                   .preferred_format      = VK_FORMAT_B8G8R8A8_UNORM,
-                                   .preferred_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
-                                   .extra_usage   = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
-                                   .old_swapchain = VK_NULL_HANDLE};
 
+                                   //.preferred_present_mode = VK_PRESENT_MODE_IMMEDIATE_KHR,
+                                   .preferred_format      = desc->swapchain_preferred_format,
+                                   .preferred_color_space = desc->swapchain_preferred_color_space,
+                                   .extra_usage           = desc->swapchain_extra_usage_flags,
+                                   .old_swapchain         = VK_NULL_HANDLE};
+
+    if(desc->swapchain_preferred_presest_mode)
+    {
+
+        sci.preferred_present_mode = desc->swapchain_preferred_presest_mode;
+    }
+    else
+    {
+        sci.preferred_present_mode = vk_swapchain_select_present_mode(r->physical_device, r->surface, desc->vsync);
+    }
 
     vk_create_swapchain(r->device, r->physical_device, &r->swapchain, &sci, r->graphics_queue, r->one_time_gfx_pool);
 
@@ -1030,7 +1105,7 @@ void renderer_create(Renderer* r, RendererDesc* desc)
     vkAllocateDescriptorSets(r->device, &ai, &r->bindless_system.set);
 
     VkPushConstantRange push_range = {
-        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
+        .stageFlags = VK_SHADER_STAGE_ALL,
 
         .offset = 0,
         .size   = 256  // your device limit
@@ -1045,7 +1120,54 @@ void renderer_create(Renderer* r, RendererDesc* desc)
         .pPushConstantRanges    = &push_range,
     };
 
+
     VK_CHECK(vkCreatePipelineLayout(r->device, &playoutci, NULL, &r->bindless_system.pipeline_layout));
+
+    VmaAllocatorCreateInfo allocatorInfo = {};
+    allocatorInfo.physicalDevice         = r->physical_device;
+    allocatorInfo.device                 = r->device;
+    allocatorInfo.instance               = r->instance.instance;
+
+    allocatorInfo.flags |= VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+    allocatorInfo.flags |= VMA_ALLOCATOR_CREATE_KHR_MAINTENANCE4_BIT;
+    allocatorInfo.flags |= VMA_ALLOCATOR_CREATE_KHR_MAINTENANCE5_BIT;
+
+    //  use VMA_DYNAMIC_VULKAN_FUNCTIONS
+    VmaVulkanFunctions vulkanFunctions = {
+        .vkGetInstanceProcAddr                   = vkGetInstanceProcAddr,
+        .vkGetDeviceProcAddr                     = vkGetDeviceProcAddr,
+        .vkGetPhysicalDeviceProperties           = vkGetPhysicalDeviceProperties,
+        .vkGetPhysicalDeviceMemoryProperties     = vkGetPhysicalDeviceMemoryProperties,
+        .vkAllocateMemory                        = vkAllocateMemory,
+        .vkFreeMemory                            = vkFreeMemory,
+        .vkMapMemory                             = vkMapMemory,
+        .vkUnmapMemory                           = vkUnmapMemory,
+        .vkFlushMappedMemoryRanges               = vkFlushMappedMemoryRanges,
+        .vkInvalidateMappedMemoryRanges          = vkInvalidateMappedMemoryRanges,
+        .vkBindBufferMemory                      = vkBindBufferMemory,
+        .vkBindImageMemory                       = vkBindImageMemory,
+        .vkGetBufferMemoryRequirements           = vkGetBufferMemoryRequirements,
+        .vkGetImageMemoryRequirements            = vkGetImageMemoryRequirements,
+        .vkCreateBuffer                          = vkCreateBuffer,
+        .vkDestroyBuffer                         = vkDestroyBuffer,
+        .vkCreateImage                           = vkCreateImage,
+        .vkDestroyImage                          = vkDestroyImage,
+        .vkCmdCopyBuffer                         = vkCmdCopyBuffer,
+        .vkGetBufferMemoryRequirements2KHR       = vkGetBufferMemoryRequirements2,
+        .vkGetImageMemoryRequirements2KHR        = vkGetImageMemoryRequirements2,
+        .vkBindBufferMemory2KHR                  = vkBindBufferMemory2,
+        .vkBindImageMemory2KHR                   = vkBindImageMemory2,
+        .vkGetPhysicalDeviceMemoryProperties2KHR = vkGetPhysicalDeviceMemoryProperties2,
+        .vkGetDeviceBufferMemoryRequirements     = vkGetDeviceBufferMemoryRequirements,
+        .vkGetDeviceImageMemoryRequirements      = vkGetDeviceImageMemoryRequirements,
+    };
+    allocatorInfo.pVulkanFunctions = &vulkanFunctions;
+
+
+    vmaCreateAllocator(&allocatorInfo, &r->vmaallocator);
+
+
+    VkFormat depth_format = pick_depth_format(r->physical_device);
 }
 
 void renderer_destroy(Renderer* r)
@@ -1958,62 +2080,6 @@ void vk_cmd_set_viewport_scissor(VkCommandBuffer cmd, VkExtent2D extent)
 }
 
 
-void image_transition(VkCommandBuffer cmd, Image* img, VkImageLayout new_layout, VkPipelineStageFlags2 new_stage, VkAccessFlags2 new_access)
-{
-    assert(img);
-    assert(img->image != VK_NULL_HANDLE);
-
-    ImageState* state = &img->state;
-
-    if(state->validity == IMAGE_STATE_UNDEFINED)
-    {
-        state->layout       = VK_IMAGE_LAYOUT_UNDEFINED;
-        state->stage        = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
-        state->access       = 0;
-        state->queue_family = VK_QUEUE_FAMILY_IGNORED;
-        state->validity     = IMAGE_STATE_VALID;
-    }
-
-    if(state->layout == new_layout && state->stage == new_stage && state->access == new_access)
-    {
-        return;
-    }
-
-    VkImageAspectFlags aspect = (img->format == VK_FORMAT_D32_SFLOAT || img->format == VK_FORMAT_D24_UNORM_S8_UINT) ?
-                                    VK_IMAGE_ASPECT_DEPTH_BIT :
-                                    VK_IMAGE_ASPECT_COLOR_BIT;
-
-    VkImageMemoryBarrier2 barrier = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-
-                                     .srcStageMask  = state->stage,
-                                     .srcAccessMask = state->access,
-
-                                     .dstStageMask  = new_stage,
-                                     .dstAccessMask = new_access,
-
-                                     .oldLayout = state->layout,
-                                     .newLayout = new_layout,
-
-                                     .srcQueueFamilyIndex = state->queue_family,
-                                     .dstQueueFamilyIndex = state->queue_family,
-
-                                     .image = img->image,
-
-                                     .subresourceRange = {.aspectMask     = aspect,
-                                                          .baseMipLevel   = 0,
-                                                          .levelCount     = img->mipLevels,
-                                                          .baseArrayLayer = 0,
-                                                          .layerCount     = img->arrayLayers}};
-
-    VkDependencyInfo dep = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier};
-
-    vkCmdPipelineBarrier2(cmd, &dep);
-
-    state->layout = new_layout;
-    state->stage  = new_stage;
-    state->access = new_access;
-}
-
 void image_transition_swapchain(VkCommandBuffer cmd, FlowSwapchain* sc, VkImageLayout new_layout, VkPipelineStageFlags2 dst_stage, VkAccessFlags2 dst_access)
 {
     uint32_t index = sc->current_image;
@@ -2060,4 +2126,114 @@ void image_transition_swapchain(VkCommandBuffer cmd, FlowSwapchain* sc, VkImageL
     state->stage    = dst_stage;
     state->access   = dst_access;
     state->validity = IMAGE_STATE_VALID;
+}
+
+
+inline void cmd_transition_all_mips(VkCommandBuffer       cmd,
+                                    VkImage               image,
+                                    ImageState*           state,
+                                    VkImageAspectFlags    aspect,
+                                    uint32_t              mipCount,
+                                    VkPipelineStageFlags2 newStage,
+                                    VkAccessFlags2        newAccess,
+                                    VkImageLayout         newLayout,
+                                    uint32_t              newQueueFamily)
+{
+    if(state->validity == IMAGE_STATE_VALID)
+    {
+        if(state->stage == newStage && state->access == newAccess && state->layout == newLayout && state->queue_family == newQueueFamily)
+        {
+            return;
+        }
+    }
+
+    VkImageMemoryBarrier2 barrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+
+        .srcStageMask = state->validity == IMAGE_STATE_VALID ? state->stage : VK_PIPELINE_STAGE_2_NONE,
+
+        .srcAccessMask = state->validity == IMAGE_STATE_VALID ? state->access : VK_ACCESS_2_NONE,
+
+        .dstStageMask  = newStage,
+        .dstAccessMask = newAccess,
+
+        .oldLayout = state->validity == IMAGE_STATE_VALID ? state->layout : VK_IMAGE_LAYOUT_UNDEFINED,
+
+        .newLayout = newLayout,
+
+        .srcQueueFamilyIndex = state->validity == IMAGE_STATE_EXTERNAL ? state->queue_family : VK_QUEUE_FAMILY_IGNORED,
+
+        .dstQueueFamilyIndex = newQueueFamily,
+
+        .image = image,
+
+        .subresourceRange = image_subresource_range(aspect, 0, mipCount)};
+
+    VkDependencyInfo dep = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier};
+
+    vkCmdPipelineBarrier2(cmd, &dep);
+
+    state->stage        = newStage;
+    state->access       = newAccess;
+    state->layout       = newLayout;
+    state->queue_family = newQueueFamily;
+    state->validity     = IMAGE_STATE_VALID;
+    state->dirty_mips   = 0;
+}
+
+
+inline void cmd_transition_mip(VkCommandBuffer       cmd,
+                               VkImage               image,
+                               ImageState*           state,
+                               VkImageAspectFlags    aspect,
+                               uint32_t              mip,
+                               VkPipelineStageFlags2 newStage,
+                               VkAccessFlags2        newAccess,
+                               VkImageLayout         newLayout,
+                               uint32_t              newQueueFamily)
+{
+    uint32_t bit = 1u << mip;
+
+    if(state->validity == IMAGE_STATE_VALID)
+    {
+        if((state->dirty_mips & bit) == 0 && state->stage == newStage && state->access == newAccess
+           && state->layout == newLayout && state->queue_family == newQueueFamily)
+        {
+            return;
+        }
+    }
+
+    VkImageMemoryBarrier2 barrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+
+        .srcStageMask = state->validity == IMAGE_STATE_VALID ? state->stage : VK_PIPELINE_STAGE_2_NONE,
+
+        .srcAccessMask = state->validity == IMAGE_STATE_VALID ? state->access : VK_ACCESS_2_NONE,
+
+        .dstStageMask  = newStage,
+        .dstAccessMask = newAccess,
+
+        .oldLayout = state->validity == IMAGE_STATE_VALID ? state->layout : VK_IMAGE_LAYOUT_UNDEFINED,
+
+        .newLayout = newLayout,
+
+        .srcQueueFamilyIndex = state->validity == IMAGE_STATE_EXTERNAL ? state->queue_family : VK_QUEUE_FAMILY_IGNORED,
+
+        .dstQueueFamilyIndex = newQueueFamily,
+
+        .image = image,
+
+        .subresourceRange = image_subresource_range(aspect, mip, 1)};
+
+    VkDependencyInfo dep = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier};
+
+    vkCmdPipelineBarrier2(cmd, &dep);
+
+    state->stage        = newStage;
+    state->access       = newAccess;
+    state->layout       = newLayout;
+    state->queue_family = newQueueFamily;
+    state->validity     = IMAGE_STATE_VALID;
+
+    state->dirty_mips &= ~bit;
 }

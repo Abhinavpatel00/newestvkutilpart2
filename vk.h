@@ -5,7 +5,21 @@
 #include <stdint.h>
 #include <vulkan/vulkan_core.h>
 #include "cachestuff.h"
-#define DEBUG
+
+
+#define MAX_MIPS 16
+#define MAX_SWAPCHAIN_IMAGES 8
+
+#define MAX_BINDLESS_TEXTURES 65536
+#define MAX_BINDLESS_SAMPLERS 256
+#define MAX_BINDLESS_STORAGE_BUFFERS 65536
+#define MAX_BINDLESS_UNIFORM_BUFFERS 16384
+#define MAX_BINDLESS_STORAGE_IMAGES 16384
+#define MAX_BINDLESS_VERTEX_BUFFERS 65536
+#define MAX_BINDLESS_INDEX_BUFFERS 65536
+#define MAX_BINDLESS_MATERIALS 65536
+#define MAX_BINDLESS_TRANSFORMS 65536
+
 
 typedef struct
 {
@@ -13,7 +27,8 @@ typedef struct
 #ifdef DEBUG
     VkDebugUtilsMessengerEXT debug_messenger;
 #endif
-    VkAllocationCallbacks* allocator;
+
+    VkAllocationCallbacks* allocatorcallbacks;
 } InstanceContext;
 
 
@@ -33,8 +48,8 @@ typedef struct
     uint32_t compute_queue_index;
     uint32_t transfer_queue_index;
 
-    VkAllocationCallbacks* allocator;
 
+    VkAllocationCallbacks* allocatorcallbacks;
 
 } DeviceContext;
 
@@ -87,8 +102,13 @@ typedef struct
     VkDebugUtilsMessageTypeFlagsEXT     validation_types;
     bool                                use_custom_features;
     VkFeatureChain                      custom_features;
+    VkPresentModeKHR                    swapchain_preferred_presest_mode;
+    VkFormat                            swapchain_preferred_format;
 
+    VkColorSpaceKHR swapchain_preferred_color_space;
 
+    VkImageUsageFlags swapchain_extra_usage_flags; /* Additional usage flags */
+    bool              vsync;
 } RendererDesc;
 
 
@@ -98,31 +118,29 @@ typedef enum ImageStateValidity
     IMAGE_STATE_VALID     = 1,
     IMAGE_STATE_EXTERNAL  = 2,
 } ImageStateValidity;
-typedef struct ImageState
+
+
+typedef struct ALIGNAS(32) ImageState
 {
-    VkImageLayout         layout;
-    VkPipelineStageFlags2 stage;
-    VkAccessFlags2        access;
-    uint32_t              queue_family;
-    ImageStateValidity    validity;
+    VkPipelineStageFlags2 stage;         // 8
+    VkAccessFlags2        access;        // 8
+    VkImageLayout         layout;        // 4
+    uint32_t              queue_family;  // 4
+    ImageStateValidity    validity;      // 4
+    uint32_t              dirty_mips;    // 4
 } ImageState;
 
-typedef struct Image
-{
-    VkImage       image;
-    VkExtent3D    extent;
-    VkFormat      format;
-    uint32_t      mipLevels;
-    uint32_t      arrayLayers;
-    VmaAllocation allocation;
 
-    VkImageUsageFlags usage;
-    VkImageView       image_view;
-    VkSampler         sampler;
-
-    ImageState state;
-} Image;
-#define MAX_SWAPCHAIN_IMAGES 8
+//
+// for each texture in pool
+// {
+//     if texture.requestedMip < texture.residentMip
+//         stream_in(texture)
+//
+//     if texture.requestedMip > texture.residentMip
+//         stream_out(texture)
+// }
+//
 
 
 typedef struct ALIGNAS(64) FlowSwapchain
@@ -176,22 +194,15 @@ typedef struct
 
 #pragma once
 
-#define MAX_BINDLESS_TEXTURES 65536
-#define MAX_BINDLESS_SAMPLERS 256
-#define MAX_BINDLESS_STORAGE_BUFFERS 65536
-#define MAX_BINDLESS_UNIFORM_BUFFERS 16384
-#define MAX_BINDLESS_STORAGE_IMAGES 16384
-#define MAX_BINDLESS_VERTEX_BUFFERS 65536
-#define MAX_BINDLESS_INDEX_BUFFERS 65536
-#define MAX_BINDLESS_MATERIALS 65536
-#define MAX_BINDLESS_TRANSFORMS 65536
 
 typedef struct Bindless
 {
     VkDescriptorSetLayout set_layout;
     VkDescriptorPool      pool;
     VkDescriptorSet       set;
+
     VkPipelineLayout pipeline_layout;
+
 } Bindless;
 #define MAX_FRAMES_IN_FLIGHT 3
 typedef struct
@@ -211,25 +222,28 @@ typedef struct
     uint32_t compute_queue_index;
     uint32_t transfer_queue_index;
 
-    VkAllocationCallbacks* allocator;
-
+    VkAllocationCallbacks* allocatorcallbacks;
+    VmaAllocator           vmaallocator;
 
     VkSurfaceKHR  surface;
     FlowSwapchain swapchain;
     GLFWwindow*   window;
     FrameContext  frames[MAX_FRAMES_IN_FLIGHT];
     uint32_t      current_frame;
-    //
+
+
     // DescriptorLayoutCache descriptor_layout_cache;
     // PipelineLayoutCache   pipeline_layout_cache;
-    Bindless              bindless_system;
+    Bindless bindless_system;
 
     VkCommandPool one_time_gfx_pool;
-    DeviceInfo    info;
+    VkCommandPool transfer_pool;
+
+    DeviceInfo info;
 
     VkPipelineCache pipeline_cache;
 
-    Image depth;
+    //  RenderTarget depth[MAX_SWAPCHAIN_IMAGES];
 } Renderer;
 
 #define MAX_VERTEX_ATTRS 8
@@ -352,7 +366,7 @@ static ColorAttachmentBlend blend_disabled(void)
         .write_mask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
     };
 }
-static GraphicsPipelineConfig pipeline_config_default(void)
+static inline GraphicsPipelineConfig pipeline_config_default(void)
 {
     GraphicsPipelineConfig cfg = {0};
 
@@ -393,6 +407,7 @@ typedef enum SwapchainResult
 bool is_instance_extension_supported(const char* extension_name);
 void renderer_create(Renderer* r, RendererDesc* desc);
 
+void renderer_destroy(Renderer* r);
 void vk_create_swapchain(VkDevice                       device,
                          VkPhysicalDevice               gpu,
                          FlowSwapchain*                 out_swapchain,
@@ -408,13 +423,327 @@ void vk_swapchain_recreate(VkDevice device, VkPhysicalDevice gpu, FlowSwapchain*
 VkPresentModeKHR vk_swapchain_select_present_mode(VkPhysicalDevice physical_device, VkSurfaceKHR surface, bool vsync);
 
 
-void image_transition(VkCommandBuffer cmd, Image* image, VkImageLayout new_layout, VkPipelineStageFlags2 new_stage, VkAccessFlags2 new_access);
-
 void image_transition_swapchain(VkCommandBuffer cmd, FlowSwapchain* sc, VkImageLayout new_layout, VkPipelineStageFlags2 new_stage, VkAccessFlags2 new_access);
 
 void image_transition_simple(VkCommandBuffer cmd, VkImage image, VkImageAspectFlags aspect, VkImageLayout old_layout, VkImageLayout new_layout);
 
 
+static inline VkImageSubresourceRange image_subresource_range(VkImageAspectFlags aspect, uint32_t baseMip, uint32_t mipCount)
+{
+    VkImageSubresourceRange range = {
+        .aspectMask = aspect, .baseMipLevel = baseMip, .levelCount = mipCount, .baseArrayLayer = 0, .layerCount = VK_REMAINING_ARRAY_LAYERS};
+
+    return range;
+}
+void cmd_transition_all_mips(VkCommandBuffer       cmd,
+                             VkImage               image,
+                             ImageState*           state,
+                             VkImageAspectFlags    aspect,
+                             uint32_t              mipCount,
+                             VkPipelineStageFlags2 newStage,
+                             VkAccessFlags2        newAccess,
+                             VkImageLayout         newLayout,
+                             uint32_t              newQueueFamilyi);
+
+void cmd_transition_mip(VkCommandBuffer       cmd,
+                        VkImage               image,
+                        ImageState*           state,
+                        VkImageAspectFlags    aspect,
+                        uint32_t              mip,
+                        VkPipelineStageFlags2 newStage,
+                        VkAccessFlags2        newAccess,
+                        VkImageLayout         newLayout,
+                        uint32_t              newQueueFamily);
+
+typedef struct
+{
+    uint32_t handle; 
+    uint32_t generation;
+} BufferHandle;
+typedef struct
+{
+    uint32_t handle;
+    uint32_t generation;
+} TextureHandle;
+
+//
+// typedef enum
+// {
+//     TEXTURE_STREAMING_IDLE,
+//     TEXTURE_STREAMING_IN,
+//     TEXTURE_STREAMING_OUT
+// } TextureStreamingState;
+//
+//
+// typedef enum
+// {
+//     TEXTURE_RESIDENCY_NONE,
+//     TEXTURE_RESIDENCY_PARTIAL,
+//     TEXTURE_RESIDENCY_FULL
+// } TextureResidency;
+//
+//
+// // ------------------------------------------------------------
+// // TEXTURE OBJECT
+// // ------------------------------------------------------------
+//
+// typedef struct
+// {
+//     VkImage       image;
+//     VmaAllocation allocation;
+//     VkImageView   view;
+//
+//     uint32_t width;
+//     uint32_t height;
+//     uint32_t mipCount;
+//
+//     uint32_t residentMip;
+//     uint32_t requestedMip;
+//
+//     TextureResidency      residency;
+//     TextureStreamingState streaming;
+//
+//
+//     ImageState state;
+//
+//     uint32_t generation;
+//
+// } Texture;
+//
+// // ------------------------------------------------------------
+// // POOL
+// // ------------------------------------------------------------
+//
+// typedef struct
+// {
+//     Texture textures[MAX_BINDLESS_TEXTURES];
+//
+//     uint32_t freeList[MAX_BINDLESS_TEXTURES];
+//     uint32_t freeCount;
+//
+// } TexturePool;
+//
+// typedef struct TextureStreamRequest
+// {
+//     TextureHandle handle;
+//     uint32_t      mip;
+// } TextureStreamRequest;
+//
+// static Texture* texture_get(TextureHandle handle, TexturePool* pool)
+// {
+//     Texture* tex = &pool->textures[handle.index];
+//
+//     if(tex->generation != handle.generation)
+//         return NULL;
+//
+//     return tex;
+// }
+//
+//
+// static TextureHandle texture_alloc_handle(TexturePool* pool)
+// {
+//     assert(pool->freeCount > 0);
+//
+//     uint32_t index = pool->freeList[--pool->freeCount];
+//
+//     Texture* tex = &pool->textures[index];
+//
+//     tex->generation++;
+//
+//     tex->residentMip  = UINT32_MAX;
+//     tex->requestedMip = UINT32_MAX;
+//
+//     tex->residency = TEXTURE_RESIDENCY_NONE;
+//     tex->streaming = TEXTURE_STREAMING_IDLE;
+//
+//     tex->state.validity = IMAGE_STATE_UNDEFINED;
+//
+//     TextureHandle h = {.index = index, .generation = tex->generation};
+//
+//     return h;
+// }
+//
+//
+// // ------------------------------------------------------------
+// // INIT
+// // ------------------------------------------------------------
+//
+//
+// void texture_system_init(TexturePool* pool)
+// {
+//     memset(pool, 0, sizeof(*pool));
+//
+//     pool->freeCount = MAX_BINDLESS_TEXTURES;
+//
+//     for(uint32_t i = 0; i < MAX_BINDLESS_TEXTURES; i++)
+//         pool->freeList[i] = i;
+// }
+// void texture_stream_in(TextureHandle handle,
+//                        uint32_t      mip,
+//                        VkBuffer      stagingBuffer,
+//                        VkDeviceSize  offset,
+//                        TexturePool*  pool,
+//                        VkDevice      device,
+//                        VkCommandPool transferpool,
+//                        VkQueue       transferqueue)
+// {
+//     Texture* tex = texture_get(handle, pool);
+//
+//     VkCommandBuffer cmd = begin_one_time_cmd(device, transferpool);
+//
+//
+//     cmd_transition_mip(cmd, tex->image, &tex->state, VK_IMAGE_ASPECT_COLOR_BIT, mip, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+//                        VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_QUEUE_FAMILY_IGNORED);
+//
+//     uint32_t w = tex->width >> mip;
+//     uint32_t h = tex->height >> mip;
+//
+//     if(w == 0)
+//         w = 1;
+//     if(h == 0)
+//         h = 1;
+//
+//
+//     VkBufferImageCopy copy = {
+//         .bufferOffset = offset,
+//
+//         .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = mip, .baseArrayLayer = 0, .layerCount = 1},
+//         .imageExtent = {w, h, 1}};
+//
+//     vkCmdCopyBufferToImage(cmd, stagingBuffer, tex->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+//
+//     cmd_transition_mip(cmd, tex->image, &tex->state, VK_IMAGE_ASPECT_COLOR_BIT, mip, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+//                        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_QUEUE_FAMILY_IGNORED);
+//     end_one_time_cmd(device, transferqueue, transferpool, cmd);
+//
+//     tex->residentMip = mip;
+//
+//     if(mip == 0)
+//         tex->residency = TEXTURE_RESIDENCY_FULL;
+// }
+//
+//
+// // ------------------------------------------------------------
+// // UPDATE STREAMING
+// // ------------------------------------------------------------
+//
+// uint32_t texture_streaming_update(TexturePool* pool, TextureStreamRequest* requests, uint32_t maxRequests)
+// {
+//     uint32_t count = 0;
+//
+//     for(uint32_t i = 0; i < MAX_BINDLESS_TEXTURES; i++)
+//     {
+//         Texture* tex = &pool->textures[i];
+//
+//         if(tex->generation == 0)
+//             continue;
+//
+//         if(tex->requestedMip < tex->residentMip)
+//         {
+//             tex->streaming = TEXTURE_STREAMING_IN;
+//
+//             if(count < maxRequests)
+//             {
+//                 requests[count++] = (TextureStreamRequest){.handle = {i, tex->generation}, .mip = tex->residentMip - 1};
+//             }
+//         }
+//         else if(tex->requestedMip > tex->residentMip)
+//         {
+//             tex->streaming = TEXTURE_STREAMING_OUT;
+//         }
+//         else
+//         {
+//             tex->streaming = TEXTURE_STREAMING_IDLE;
+//         }
+//     }
+//
+//     return count;
+// }
+// void texture_destroy(TextureHandle handle, TexturePool* pool, Renderer* r)
+// {
+//     Texture* tex = texture_get(handle, pool);
+//
+//     if(!tex)
+//         return;
+//
+//     vkDestroyImageView(r->device, tex->view, NULL);
+//     vmaDestroyImage(r->vmaallocator, tex->image, tex->allocation);
+//     tex->generation++;  // ← CRITICAL
+//     pool->freeList[pool->freeCount++] = handle.index;
+//
+//
+//     VkDescriptorImageInfo info = {.imageView = VK_NULL_HANDLE, .imageLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+//
+//     VkWriteDescriptorSet write = {.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+//                                   .dstSet          = r->bindless_system.set,
+//                                   .dstBinding      = 0,
+//                                   .dstArrayElement = handle.index,
+//                                   .descriptorCount = 1,
+//                                   .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+//                                   .pImageInfo      = &info};
+//
+//     vkUpdateDescriptorSets(r->device, 1, &write, 0, NULL);
+// }
+//
+// void texture_bind(TextureHandle handle, TexturePool* pool, Renderer* r)
+// {
+//     Texture* tex = texture_get(handle, pool);
+//
+//     VkDescriptorImageInfo info = {.imageView = tex->view, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+//
+//     VkWriteDescriptorSet write = {.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+//                                   .dstSet          = r->bindless_system.set,
+//                                   .dstBinding      = 0,
+//                                   .dstArrayElement = handle.index,
+//                                   .descriptorCount = 1,
+//                                   .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+//                                   .pImageInfo      = &info};
+//
+//     vkUpdateDescriptorSets(r->device, 1, &write, 0, NULL);
+// }
+//
+// TextureHandle texture_create(TexturePool* pool, Renderer* r, uint32_t width, uint32_t height, uint32_t mipCount, VkFormat format)
+// {
+//     TextureHandle handle = texture_alloc_handle(pool);
+//
+//     Texture* tex = texture_get(handle, pool);
+//
+//     tex->width    = width;
+//     tex->height   = height;
+//     tex->mipCount = mipCount;
+//
+//     tex->residentMip  = mipCount - 1;
+//     tex->requestedMip = mipCount - 1;
+//
+//     tex->residency = TEXTURE_RESIDENCY_PARTIAL;
+//
+//     VkImageCreateInfo imageInfo = {.sType       = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+//                                    .imageType   = VK_IMAGE_TYPE_2D,
+//                                    .format      = format,
+//                                    .extent      = {width, height, 1},
+//                                    .mipLevels   = mipCount,
+//                                    .arrayLayers = 1,
+//                                    .samples     = VK_SAMPLE_COUNT_1_BIT,
+//                                    .tiling      = VK_IMAGE_TILING_OPTIMAL,
+//                                    .usage       = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT};
+//
+//     VmaAllocationCreateInfo allocInfo = {.usage = VMA_MEMORY_USAGE_GPU_ONLY};
+//
+//     vmaCreateImage(r->vmaallocator, &imageInfo, &allocInfo, &tex->image, &tex->allocation, NULL);
+//
+//     VkImageViewCreateInfo viewInfo = {
+//         .sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+//         .image    = tex->image,
+//         .viewType = VK_IMAGE_VIEW_TYPE_2D,
+//         .format   = format,
+//         .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = mipCount, .layerCount = 1}};
+//
+//     vkCreateImageView(r->device, &viewInfo, NULL, &tex->view);
+//
+//     texture_bind(handle, pool, r);
+//
+//     return handle;
+// }
 //
 //Instance → GPU selection → Query capabilities → Enable features → Create logical device → Store result
 //
