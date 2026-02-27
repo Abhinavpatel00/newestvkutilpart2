@@ -250,12 +250,16 @@ void query_device_features(VkPhysicalDevice gpu, VkFeatureChain* out)
 
     // maintenance5 feature struct
     out->maintenance5.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR;
+    
+    // shader non-semantic info feature struct (for debug printf)
+    out->shaderNonSemanticInfo.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_NON_SEMANTIC_INFO_FEATURES_KHR;
 
-    // Chain: core -> v11 -> v12 -> v13 -> maintenance5
+    // Chain: core -> v11 -> v12 -> v13 -> maintenance5 -> shaderNonSemanticInfo
     out->core.pNext = &out->v11;
     out->v11.pNext  = &out->v12;
     out->v12.pNext  = &out->v13;
     out->v13.pNext  = &out->maintenance5;
+    out->maintenance5.pNext = &out->shaderNonSemanticInfo;
 
     vkGetPhysicalDeviceFeatures2(gpu, &out->core);
 }
@@ -279,6 +283,7 @@ typedef struct RendererCaps
     bool robustness2;            // NEW
     bool index_type_uint8;       // NEW
     bool subgroup_size_control;  // NEW
+    bool debug_printf;           // Debug Printf support (VK_KHR_shader_non_semantic_info)
 } RendererCaps;
 
 RendererCaps default_caps(void)
@@ -349,6 +354,9 @@ static void apply_caps(VkFeatureChain* f, const RendererCaps* caps)
     {
         log_info("[features] unavailable: maintenance5 (VK_KHR_maintenance5)");
     }
+    
+    TRY_ENABLE(debug_printf, f->shaderNonSemanticInfo.shaderNonSemanticInfo, "shaderNonSemanticInfo (Debug Printf)");
+    
     TRY_ENABLE(sampler_anisotropy, f->core.features.samplerAnisotropy, "samplerAnisotropy");
     TRY_ENABLE(dynamic_rendering, f->v13.dynamicRendering, "dynamic rendering");
     TRY_ENABLE(sync2, f->v13.synchronization2, "synchronization2");
@@ -886,6 +894,12 @@ void renderer_create(Renderer* r, RendererDesc* desc)
         query_device_features(r->physical_device, &r->info.feature_chain);
 
         RendererCaps caps = default_caps();
+        
+        // Enable debug printf if requested
+        if(desc->enable_debug_printf)
+        {
+            caps.debug_printf = true;
+        }
 
         apply_caps(&r->info.feature_chain, &caps);
     }
@@ -949,6 +963,16 @@ void renderer_create(Renderer* r, RendererDesc* desc)
         if(device_has_extension(r->physical_device, VK_KHR_MAINTENANCE_5_EXTENSION_NAME))
         {
             extensions[ext_count++] = VK_KHR_MAINTENANCE_5_EXTENSION_NAME;
+        }
+        
+        if(desc->enable_debug_printf && device_has_extension(r->physical_device, VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME))
+        {
+            extensions[ext_count++] = VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME;
+            log_info("[renderer] VK_KHR_shader_non_semantic_info enabled for Debug Printf");
+        }
+        else if(desc->enable_debug_printf)
+        {
+            log_info("[renderer] VK_KHR_shader_non_semantic_info not available - Debug Printf disabled");
         }
 
         VkDeviceCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
@@ -1106,9 +1130,8 @@ void renderer_create(Renderer* r, RendererDesc* desc)
 
     VkPushConstantRange push_range = {
         .stageFlags = VK_SHADER_STAGE_ALL,
-
-        .offset = 0,
-        .size   = 256  // your device limit
+        .offset     = 0,
+        .size       = 256  // your device limit
     };
 
     VkPipelineLayoutCreateInfo playoutci = {
@@ -1382,83 +1405,6 @@ void vk_swapchain_destroy(VkDevice device, FlowSwapchain* swapchain)
     }
 
     memset(swapchain, 0, sizeof(*swapchain));
-}
-
-
-bool vk_swapchain_acquire(VkDevice device, FlowSwapchain* sc, VkSemaphore image_available, VkFence fence, uint64_t timeout)
-{
-    VkResult r = vkAcquireNextImageKHR(device, sc->swapchain, timeout, image_available, fence, &sc->current_image);
-
-    if(r == VK_SUCCESS)
-        return true;
-
-    if(r == VK_SUBOPTIMAL_KHR || r == VK_ERROR_OUT_OF_DATE_KHR)
-    {
-        sc->needs_recreate = true;
-        return false;
-    }
-
-    VK_CHECK(r);
-    return false;
-}
-
-bool vk_swapchain_present(VkQueue present_queue, FlowSwapchain* sc, const VkSemaphore* waits, uint32_t wait_count)
-{
-    VkPresentInfoKHR info = {
-        .sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-        .waitSemaphoreCount = wait_count,
-        .pWaitSemaphores    = waits,
-        .swapchainCount     = 1,
-        .pSwapchains        = &sc->swapchain,
-        .pImageIndices      = &sc->current_image,
-    };
-
-    VkResult r = vkQueuePresentKHR(present_queue, &info);
-
-    if(r == VK_SUBOPTIMAL_KHR || r == VK_ERROR_OUT_OF_DATE_KHR)
-    {
-        sc->needs_recreate = true;
-        return false;
-    }
-
-    VK_CHECK(r);
-    return true;
-}
-VkPresentModeKHR vk_swapchain_select_present_mode(VkPhysicalDevice physical_device, VkSurfaceKHR surface, bool vsync)
-{
-    uint32_t mode_count = 0;
-    vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, surface, &mode_count, NULL);
-
-    VkPresentModeKHR modes[16];
-    if(mode_count > 16)
-        mode_count = 16;
-    vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, surface, &mode_count, modes);
-
-    if(vsync)
-    {
-        /* Prefer FIFO (always available) */
-        return VK_PRESENT_MODE_FIFO_KHR;
-    }
-
-    /* Prefer mailbox for low-latency without tearing */
-    for(uint32_t i = 0; i < mode_count; i++)
-    {
-        if(modes[i] == VK_PRESENT_MODE_MAILBOX_KHR)
-        {
-            return VK_PRESENT_MODE_MAILBOX_KHR;
-        }
-    }
-
-    /* Fall back to immediate */
-    for(uint32_t i = 0; i < mode_count; i++)
-    {
-        if(modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR)
-        {
-            return VK_PRESENT_MODE_IMMEDIATE_KHR;
-        }
-    }
-
-    return VK_PRESENT_MODE_FIFO_KHR;
 }
 
 
@@ -2236,4 +2182,54 @@ inline void cmd_transition_mip(VkCommandBuffer       cmd,
     state->validity     = IMAGE_STATE_VALID;
 
     state->dirty_mips &= ~bit;
+}
+
+
+VkPresentModeKHR vk_swapchain_select_present_mode(VkPhysicalDevice physical_device, VkSurfaceKHR surface, bool vsync)
+{
+    uint32_t count = 0;
+
+    VK_CHECK(vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, surface, &count, NULL));
+
+    VkPresentModeKHR modes[16];
+
+    if(count > 16)
+        count = 16;  // sanity clamp
+
+    VK_CHECK(vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, surface, &count, modes));
+
+
+    // ============================================================
+    // VSYNC ON → must use FIFO (guaranteed by Vulkan spec)
+    // ============================================================
+
+    if(vsync)
+    {
+        for(uint32_t i = 0; i < count; i++)
+        {
+            if(modes[i] == VK_PRESENT_MODE_FIFO_KHR)
+                return VK_PRESENT_MODE_FIFO_KHR;
+        }
+
+        // Spec guarantees FIFO exists, but fallback anyway
+        return VK_PRESENT_MODE_FIFO_KHR;
+    }
+
+
+    // ============================================================
+    // VSYNC OFF → prefer MAILBOX, then IMMEDIATE, fallback FIFO
+    // ============================================================
+
+    VkPresentModeKHR best = VK_PRESENT_MODE_FIFO_KHR;
+
+    for(uint32_t i = 0; i < count; i++)
+    {
+        if(modes[i] == VK_PRESENT_MODE_MAILBOX_KHR)
+            return VK_PRESENT_MODE_MAILBOX_KHR;
+
+        if(modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR)
+            best = VK_PRESENT_MODE_IMMEDIATE_KHR;
+    }
+
+    return best;
 }

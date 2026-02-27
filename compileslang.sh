@@ -20,10 +20,11 @@ compile_stage ()
 
     if [ ! -f "$out" ] || [ "$src" -nt "$out" ]; then
         echo "  $stage → $out"
-/opt/shader-slang-bin/bin/slangc "$src" \
+    /opt/shader-slang-bin/bin/slangc "$src" \
             -target spirv \
             -entry "$entry" \
             -stage "$stage" \
+            ${SLANG_DEFINES:-} \
             -o "$out"
     fi
 }

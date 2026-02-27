@@ -18,7 +18,7 @@ int main(int argc, char** argv)
         "-std=gnu99",
         "-ggdb",
         "-DDEBUG",
-
+// "-fverbose-asm"
     };
 
     const char* common_cxxflags[] = {

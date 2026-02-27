@@ -6,66 +6,6 @@
 #include <stdio.h>
 #include <vulkan/vulkan_core.h>
 
-#define CACHELINE_SIZE 64
-
-#define ANALYZE_STRUCT(type) analyze_struct(#type, sizeof(type), alignof(type))
-
-void analyze_struct(const char* name, size_t size, size_t alignment)
-{
-    printf("\nSTRUCT ANALYSIS: %s\n", name);
-
-    printf("  size             : %zu bytes\n", size);
-    printf("  alignment        : %zu bytes\n", alignment);
-
-    size_t cachelines = (size + CACHELINE_SIZE - 1) / CACHELINE_SIZE;
-
-    printf("  cachelines used  : %zu\n", cachelines);
-
-    size_t wasted = cachelines * CACHELINE_SIZE - size;
-
-    printf("  wasted space     : %zu bytes\n", wasted);
-
-    // performance warnings
-
-    if(size < CACHELINE_SIZE)
-    {
-        printf("  perf             : GOOD (fits in one cacheline)\n");
-    }
-    else if(size == CACHELINE_SIZE)
-    {
-        printf("  perf             : PERFECT (exact cacheline fit)\n");
-    }
-    else
-    {
-        printf("  perf             : WARNING (spans multiple cachelines)\n");
-    }
-
-    if(alignment < 16)
-    {
-        printf("  alignment warn   : BAD (should be >= 16)\n");
-    }
-    else if(alignment >= CACHELINE_SIZE)
-    {
-        printf("  alignment        : EXCELLENT (cacheline aligned)\n");
-    }
-
-    if(size % alignment != 0)
-    {
-        printf("  layout warn      : size not multiple of alignment\n");
-    }
-
-    // false sharing risk
-    if(size < CACHELINE_SIZE)
-    {
-        printf("  false sharing    : POSSIBLE\n");
-    }
-    else
-    {
-        printf("  false sharing    : SAFE\n");
-    }
-}
-
-
 // Renderer
 //     ├── InstanceContext
 //     ├── PhysicalDeviceInfo
@@ -116,6 +56,23 @@ void analyze_struct(const char* name, size_t size, size_t alignment)
 //
 //
 //\
+// record_frame()
+// {
+//     begin_rendering();
+//     bind_pipeline(TRIANGLE_PIPELINE);
+//     push_constants();
+//     draw();
+//     end_rendering();
+// }
+//
+typedef struct Buffer
+{
+    VkBuffer        buffer;  // vulkan buffer
+    VkDeviceSize    buffer_size;
+    VkDeviceAddress address;     // addr of the buffer in the shader
+    uint8_t*        mapping;     //this is a CPU pointer directly into GPU-visible memory.
+    VmaAllocation   allocation;  // Memory associated with the buffer
+} Buffer;
 
 
 typedef enum PipelineID
@@ -129,15 +86,14 @@ typedef struct RenderPipelines
 } RendererPipelines;
 
 
-typedef enum
+#define MAX_PUSH_CONSTANTS 128
+
+typedef enum PassType
 {
-
-    GRAPHICS,
-    COMPUTE,
-
+    PASS_GRAPHICS,
+    PASS_COMPUTE,
 } PassType;
 
-//TODO:
 typedef enum DrawType
 {
     DRAW_DIRECT,
@@ -146,6 +102,14 @@ typedef enum DrawType
     DRAW_INDEXED_INDIRECT,
     DRAW_INDEXED_INDIRECT_COUNT,
 } DrawType;
+
+typedef enum DispatchType
+{
+    DISPATCH_DIRECT,
+    DISPATCH_INDIRECT,
+} DispatchType;
+
+
 typedef struct DrawCmd
 {
     DrawType type;
@@ -189,164 +153,133 @@ typedef struct DrawCmd
         {
             VkBuffer     buffer;
             VkDeviceSize offset;
+
             VkBuffer     countBuffer;
             VkDeviceSize countOffset;
-            uint32_t     maxDrawCount;
-            uint32_t     stride;
+
+            uint32_t maxDrawCount;
+            uint32_t stride;
         } indexed_indirect_count;
     };
+
 } DrawCmd;
 
 
-
-
-
-
-typedef enum
-{
-    RESOURCE_TEXTURE,
-    RESOURCE_BUFFER,
-} ResourceType;
-
-typedef enum
-{
-    ACCESS_READ,
-    ACCESS_WRITE,
-    ACCESS_READ_WRITE,
-} ResourceAccess;
-
-typedef enum
-{
-    USAGE_COLOR_ATTACHMENT,
-    USAGE_DEPTH_ATTACHMENT,
-    USAGE_SAMPLED,
-    USAGE_STORAGE,
-    USAGE_TRANSFER_SRC,
-    USAGE_TRANSFER_DST,
-    USAGE_UNIFORM_BUFFER,
-    USAGE_STORAGE_BUFFER,
-} ResourceUsage;
-
-typedef struct
-{
-    ResourceType type;
-    union
-    {
-        TextureHandle texture_handle;
-	BufferHandle buffer_handle;
-    };
-    ResourceUsage  usage;
-    ResourceAccess access;
-} PassResource;
-
-
-
-typedef struct {
-    TextureHandle color_attachments[8];
-    uint32_t color_count;
-    TextureHandle depth_attachment;
-} PassAttachments;
-
 typedef struct Pass
 {
-    PassType   type;
-    PipelineID pipeline_id;
-    void*      push_data;
-    uint32_t   push_size;
+    PassType type;
+
+    uint32_t pipeline_id;
+
+    VkShaderStageFlags push_stages;
+    uint32_t           push_size;
+
+    uint8_t push_data[MAX_PUSH_CONSTANTS];
 
     union
     {
-
         struct
         {
-            VkRenderingInfo    rendering;
-            VkShaderStageFlags push_stages;  //only in case of gfx may be
-            uint32_t           draw_count;
-            DrawCmd*           draws;
+            VkRenderingInfo* rendering;
+            uint32_t         draw_count;
+            DrawCmd*         draws;
         } graphics;
-
         struct
         {
-            uint32_t groupX;
-            uint32_t groupY;
-            uint32_t groupZ;
+            DispatchType type;
+            union
+            {
+                struct
+                {
+                    uint32_t x;
+                    uint32_t y;
+                    uint32_t z;
+                } direct;
+
+                struct
+                {
+                    VkBuffer     buffer;
+                    VkDeviceSize offset;
+                } indirect;
+            };
         } compute;
     };
 } Pass;
-
-void execute_pass(Renderer* r, RendererPipelines* pipelines, VkCommandBuffer cmd, Pass* pass)
+static void execute_pass(Renderer* r, RendererPipelines* pipelines, VkCommandBuffer cmd, const Pass* pass)
 {
     VkPipeline pipeline = pipelines->pipelines[pass->pipeline_id];
 
-    switch(pass->type)
+    if(pass->type == PASS_GRAPHICS)
     {
-        case GRAPHICS: {
-            vkCmdBeginRendering(cmd, &pass->graphics.rendering);
+        // Begin rendering
+        vkCmdBeginRendering(cmd, pass->graphics.rendering);
 
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        // Bind pipeline
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
-            vk_cmd_set_viewport_scissor(cmd, r->swapchain.extent);
-            vkCmdPushConstants(cmd, r->bindless_system.pipeline_layout, pass->graphics.push_stages, 0, pass->push_size,
-                               pass->push_data);
+        vk_cmd_set_viewport_scissor(cmd, r->swapchain.extent);
+        // Push constants
+        vkCmdPushConstants(cmd, r->bindless_system.pipeline_layout, pass->push_stages, 0, pass->push_size, pass->push_data);
 
+        // Execute draw commands
+        for(uint32_t i = 0; i < pass->graphics.draw_count; i++)
+        {
+            const DrawCmd* d = &pass->graphics.draws[i];
 
-            for(uint32_t i = 0; i < pass->graphics.draw_count; i++)
+            switch(d->type)
             {
-                DrawCmd* d = &pass->graphics.draws[i];
-
-                switch(d->type)
-                {
-                    case DRAW_DIRECT:
-                        vkCmdDraw(cmd, d->direct.vertexCount, d->direct.instanceCount, d->direct.firstVertex, d->direct.firstInstance);
-                        break;
-
-                    case DRAW_INDIRECT:
-                        vkCmdDrawIndirect(cmd, d->indirect.buffer, d->indirect.offset, d->indirect.drawCount,
-                                          d->indirect.stride);
-                        break;
-
-                    case DRAW_INDEXED:
-                        vkCmdDrawIndexed(cmd, d->indexed.indexCount, d->indexed.instanceCount, d->indexed.firstIndex,
-                                         d->indexed.vertexOffset, d->indexed.firstInstance);
-                        break;
-
-                    case DRAW_INDEXED_INDIRECT:
-                        vkCmdDrawIndexedIndirect(cmd, d->indexed_indirect.buffer, d->indexed_indirect.offset,
-                                                 d->indexed_indirect.drawCount, d->indexed_indirect.stride);
-                        break;
-
-                    case DRAW_INDEXED_INDIRECT_COUNT:
-                        vkCmdDrawIndexedIndirectCount(cmd, d->indexed_indirect_count.buffer, d->indexed_indirect_count.offset,
-                                                      d->indexed_indirect_count.countBuffer, d->indexed_indirect_count.countOffset,
-                                                      d->indexed_indirect_count.maxDrawCount, d->indexed_indirect_count.stride);
-                        break;
+                case DRAW_DIRECT: {
+                    vkCmdDraw(cmd, d->direct.vertexCount, d->direct.instanceCount, d->direct.firstVertex, d->direct.firstInstance);
                 }
+                break;
+
+                case DRAW_INDIRECT: {
+                    vkCmdDrawIndirect(cmd, d->indirect.buffer, d->indirect.offset, d->indirect.drawCount, d->indirect.stride);
+                }
+                break;
+
+                case DRAW_INDEXED: {
+                    vkCmdDrawIndexed(cmd, d->indexed.indexCount, d->indexed.instanceCount, d->indexed.firstIndex,
+                                     d->indexed.vertexOffset, d->indexed.firstInstance);
+                }
+                break;
+
+                case DRAW_INDEXED_INDIRECT: {
+                    vkCmdDrawIndexedIndirect(cmd, d->indexed_indirect.buffer, d->indexed_indirect.offset,
+                                             d->indexed_indirect.drawCount, d->indexed_indirect.stride);
+                }
+                break;
+
+                case DRAW_INDEXED_INDIRECT_COUNT: {
+                    vkCmdDrawIndexedIndirectCount(cmd, d->indexed_indirect_count.buffer, d->indexed_indirect_count.offset,
+                                                  d->indexed_indirect_count.countBuffer, d->indexed_indirect_count.countOffset,
+                                                  d->indexed_indirect_count.maxDrawCount, d->indexed_indirect_count.stride);
+                }
+                break;
             }
-
-            vkCmdEndRendering(cmd);
         }
-        break;
 
-        case COMPUTE: {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+        vkCmdEndRendering(cmd);
+    }
+    else  // PASS_COMPUTE
+    {
+        // Bind pipeline
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 
-            vkCmdPushConstants(cmd, r->bindless_system.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, pass->push_size,
-                               pass->push_data);
+        // Push constants
+        vkCmdPushConstants(cmd, r->bindless_system.pipeline_layout, pass->push_stages, 0, pass->push_size, pass->push_data);
 
-            vkCmdDispatch(cmd, pass->compute.groupX, pass->compute.groupY, pass->compute.groupZ);
+        // Dispatch
+        if(pass->compute.type == DISPATCH_DIRECT)
+        {
+            vkCmdDispatch(cmd, pass->compute.direct.x, pass->compute.direct.y, pass->compute.direct.z);
         }
-        break;
+        else
+        {
+            vkCmdDispatchIndirect(cmd, pass->compute.indirect.buffer, pass->compute.indirect.offset);
+        }
     }
 }
-typedef enum PassID
-{
-    TRIANGLE_PASS,
-    PASS_COUNT
-} PassID;
-typedef struct RenderPasses
-{
-    Pass Passes[PASS_COUNT];
-} RendererPasses;
 
 #define VALIDATION true
 static bool g_framebuffer_resized = false;
@@ -371,7 +304,14 @@ int main()
     u32          glfw_ext_count = 0;
     const char** glfw_exts      = glfwGetRequiredInstanceExtensions(&glfw_ext_count);
 
-
+    // To enable Debug Printf:
+    // 1. Set .enable_debug_printf             = false in RendererDesc
+    // 2. In your shader, add: #extension GL_EXT_debug_printf : enable (GLSL)
+    //    or just use printf() in HLSL/Slang
+    // 3. Add debugPrintfEXT("My value: %f", myvar) in GLSL
+    //    or printf("My value: %f", myvar) in HLSL/Slang
+    // 4. View output in RenderDoc or Validation Layers
+    
     RendererDesc desc = {
         .app_name            = "My Renderer",
         .instance_layers     = NULL,
@@ -395,6 +335,7 @@ int main()
         .swapchain_preferred_format      = VK_FORMAT_B8G8R8A8_UNORM,
         .swapchain_extra_usage_flags     = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
         .vsync                           = false,
+        .enable_debug_printf             = false, // Enable shader debug printf
     };
     Renderer          renderer         = {0};
     RendererPipelines render_pipelines = {0};
@@ -407,8 +348,53 @@ int main()
     cfg.color_attachment_count                    = 1;
     cfg.color_formats                             = &renderer.swapchain.format;
     render_pipelines.pipelines[TRIANGLE_PIPELINE] = create_graphics_pipeline(&renderer, &cfg);
+    typedef struct
+    {
+        float pos[2];
+        float color[3];
+    } Vertex;
+
+    Vertex*       cpu_vertices;
+    VkBuffer      vertex_buffer;
+    VmaAllocation alloc;
+
+    VkBufferCreateInfo ci = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size  = sizeof(Vertex) * 55555 * 3,
+        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+    };
+
+    VmaAllocationCreateInfo aci = {.usage = VMA_MEMORY_USAGE_AUTO,
+                                   .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+
+    VmaAllocationInfo info;
+
+    vmaCreateBuffer(renderer.vmaallocator, &ci, &aci, &vertex_buffer, &alloc, &info);
+
+    cpu_vertices = info.pMappedData;
+    int index    = 0;
+
+    for(int y = 0; y < 23; y++)
+        for(int x = 0; x < 23; x++)
+        {
+            float fx = x * 0.1f;
+            float fy = y * 0.1f;
+
+            cpu_vertices[index++] = (Vertex){{fx, fy}, {4, 0, 0}};
+            cpu_vertices[index++] = (Vertex){{fx + 0.005f, fy}, {0, 1, 0}};
+            cpu_vertices[index++] = (Vertex){{fx, fy + 0.005f}, {0, 0, 1}};
+        }
 
 
+    VkBufferDeviceAddressInfo addrInfo = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = vertex_buffer};
+
+    VkDeviceAddress gpu_address = vkGetBufferDeviceAddress(renderer.device, &addrInfo);
+
+
+    typedef struct
+    {
+        VkDeviceAddress vertex_ptr;
+    } Push;
     while(!glfwWindowShouldClose(renderer.window))
     {
         glfwPollEvents();
@@ -442,16 +428,18 @@ int main()
                                  renderer.frames[renderer.current_frame].image_available_semaphore, VK_NULL_HANDLE, UINT64_MAX);
         }
 
+        VkCommandBuffer cmd = renderer.frames[renderer.current_frame].cmdbuf;
+        vk_cmd_begin(renderer.frames[renderer.current_frame].cmdbuf, false);
+        {
 
-        vk_cmd_begin(renderer.frames[renderer.current_frame].cmdbuf, true);
-        vkCmdBindDescriptorSets(renderer.frames[renderer.current_frame].cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                renderer.bindless_system.pipeline_layout, 0, 1, &renderer.bindless_system.set, 0, NULL);
-        vkCmdBindDescriptorSets(renderer.frames[renderer.current_frame].cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                renderer.bindless_system.pipeline_layout, 0, 1, &renderer.bindless_system.set, 0, NULL);
-        image_transition_swapchain(renderer.frames[renderer.current_frame].cmdbuf, &renderer.swapchain,
-                                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                   VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-
+            vkCmdBindDescriptorSets(renderer.frames[renderer.current_frame].cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    renderer.bindless_system.pipeline_layout, 0, 1, &renderer.bindless_system.set, 0, NULL);
+            vkCmdBindDescriptorSets(renderer.frames[renderer.current_frame].cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                    renderer.bindless_system.pipeline_layout, 0, 1, &renderer.bindless_system.set, 0, NULL);
+            image_transition_swapchain(renderer.frames[renderer.current_frame].cmdbuf, &renderer.swapchain,
+                                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                       VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        }
 
         VkRenderingAttachmentInfo color = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
                                            .imageView = renderer.swapchain.image_views[renderer.swapchain.current_image],
@@ -466,50 +454,58 @@ int main()
                                      .colorAttachmentCount = 1,
                                      .pColorAttachments    = &color};
 
-        vkCmdBeginRendering(renderer.frames[renderer.current_frame].cmdbuf, &rendering);
-        vkCmdBindPipeline(renderer.frames[renderer.current_frame].cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                          render_pipelines.pipelines[TRIANGLE_PIPELINE]);
-        vk_cmd_set_viewport_scissor(renderer.frames[renderer.current_frame].cmdbuf, renderer.swapchain.extent);
-        vkCmdDraw(renderer.frames[renderer.current_frame].cmdbuf, 3, 1, 0, 0);
-        vkCmdEndRendering(renderer.frames[renderer.current_frame].cmdbuf);
+        {
+            vkCmdBeginRendering(cmd, &rendering);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, render_pipelines.pipelines[TRIANGLE_PIPELINE]);
+            vk_cmd_set_viewport_scissor(cmd, renderer.swapchain.extent);
+            struct
+            {
+                VkDeviceAddress vertex_ptr;
+            } push = {gpu_address};
+            vkCmdPushConstants(cmd, renderer.bindless_system.pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
+            vkCmdDraw(cmd, 55555 * 3, 1, 0, 0);
+        }
 
         image_transition_swapchain(renderer.frames[renderer.current_frame].cmdbuf, &renderer.swapchain,
                                    VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0);
         vk_cmd_end(renderer.frames[renderer.current_frame].cmdbuf);
+        
+	{
+            VkCommandBufferSubmitInfo cmd_info = {
+                .sType         = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+                .commandBuffer = renderer.frames[renderer.current_frame].cmdbuf,
+            };
+            VkSemaphoreSubmitInfo wait_info = {
+                .sType       = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+                .semaphore   = renderer.frames[renderer.current_frame].image_available_semaphore,
+                .value       = 0,
+                .stageMask   = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                .deviceIndex = 0,
+            };
 
-        VkCommandBufferSubmitInfo cmd_info = {
-            .sType         = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
-            .commandBuffer = renderer.frames[renderer.current_frame].cmdbuf,
-        };
-        VkSemaphoreSubmitInfo wait_info = {
-            .sType       = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
-            .semaphore   = renderer.frames[renderer.current_frame].image_available_semaphore,
-            .value       = 0,
-            .stageMask   = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-            .deviceIndex = 0,
-        };
+            VkSemaphoreSubmitInfo signal_info = {
+                .sType       = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+                .semaphore   = renderer.swapchain.render_finished[renderer.swapchain.current_image],
+                .value       = 0,
+                .stageMask   = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                .deviceIndex = 0,
+            };
 
-        VkSemaphoreSubmitInfo signal_info = {
-            .sType       = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
-            .semaphore   = renderer.swapchain.render_finished[renderer.swapchain.current_image],
-            .value       = 0,
-            .stageMask   = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-            .deviceIndex = 0,
-        };
+            VkSubmitInfo2 submit = {
+                .sType                    = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+                .waitSemaphoreInfoCount   = 1,
+                .pWaitSemaphoreInfos      = &wait_info,
+                .commandBufferInfoCount   = 1,
+                .pCommandBufferInfos      = &cmd_info,
+                .signalSemaphoreInfoCount = 1,
+                .pSignalSemaphoreInfos    = &signal_info,
+            };
 
-        VkSubmitInfo2 submit = {
-            .sType                    = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
-            .waitSemaphoreInfoCount   = 1,
-            .pWaitSemaphoreInfos      = &wait_info,
-            .commandBufferInfoCount   = 1,
-            .pCommandBufferInfos      = &cmd_info,
-            .signalSemaphoreInfoCount = 1,
-            .pSignalSemaphoreInfos    = &signal_info,
-        };
+            VK_CHECK(vkQueueSubmit2(renderer.graphics_queue, 1, &submit, renderer.frames[renderer.current_frame].in_flight_fence));
 
-        VK_CHECK(vkQueueSubmit2(renderer.graphics_queue, 1, &submit, renderer.frames[renderer.current_frame].in_flight_fence));
-        vk_swapchain_present(renderer.present_queue, &renderer.swapchain,
-                             &renderer.swapchain.render_finished[renderer.swapchain.current_image], 1);
+            vk_swapchain_present(renderer.present_queue, &renderer.swapchain,
+                                 &renderer.swapchain.render_finished[renderer.swapchain.current_image], 1);
+        }
         renderer.current_frame = (renderer.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 

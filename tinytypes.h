@@ -45,11 +45,23 @@ uint64_t round_up_64(uint64_t a, uint64_t b);
         }                                                                                                              \
     } while(0)
 
+
+
 #define SWAP(type, a, b) do {     \
     type _temp = (a);             \
     (a) = (b);                    \
     (b) = _temp;                  \
 } while (0)
+
+
+#if defined(_MSC_VER)
+    #define FORCE_INLINE __forceinline
+#elif defined(__GNUC__) || defined(__clang__)
+    #define FORCE_INLINE inline __attribute__((always_inline))
+#else
+    #define FORCE_INLINE inline
+#endif
+
 
 // Usage: SWAP(int, x, y);
 #define ARRAY_COUNT(array) (sizeof(array)) / (sizeof(array[1]))
@@ -118,5 +130,7 @@ typedef SSIZE_T ssize_t;
 #endif
 
 #endif
+
+
 
 #endif  // TINYTYPES_H_

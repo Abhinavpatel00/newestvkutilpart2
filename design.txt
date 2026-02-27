@@ -5,6 +5,13 @@ renderer_create
     allocate bindless set
     create global pipeline layout
 
+Design decision:
+    We use a single descriptor set layout and a single pipeline layout for all pipelines.
+    This keeps the bindless renderer simple and avoids per-pipeline layout churn.
+
+    New buffers are suballocated from larger GPU buffers.
+    We pass offsets via push constants and use an offset allocator to manage ranges.
+
 create pipelines using global layout
 
 per frame:
@@ -16,7 +23,16 @@ per draw:
     draw
 
 GPU pulls everything
+Instead of:
 
+bind descriptor set
+bind vertex buffer
+draw
+
+You do:
+
+push GPU address
+draw
 
 maxPushConstantsSize = 256 bytes
 That’s the Vulkan-guaranteed fast path. This memory lives in register space or extremely fast constant cache, not VRAM.

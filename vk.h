@@ -6,6 +6,25 @@
 #include <vulkan/vulkan_core.h>
 #include "cachestuff.h"
 
+// Fallback for older Vulkan headers without VK_KHR_shader_non_semantic_info
+#ifndef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_NON_SEMANTIC_INFO_FEATURES_KHR
+#define VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_NON_SEMANTIC_INFO_FEATURES_KHR 1000333000
+#endif
+
+#ifndef VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME
+#define VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME "VK_KHR_shader_non_semantic_info"
+#endif
+
+#ifndef VK_PHYSICAL_DEVICE_SHADER_NON_SEMANTIC_INFO_FEATURES_KHR
+#define VK_PHYSICAL_DEVICE_SHADER_NON_SEMANTIC_INFO_FEATURES_KHR 1
+typedef struct VkPhysicalDeviceShaderNonSemanticInfoFeaturesKHR
+{
+    VkStructureType sType;
+    void*           pNext;
+    VkBool32        shaderNonSemanticInfo;
+} VkPhysicalDeviceShaderNonSemanticInfoFeaturesKHR;
+#endif
+
 
 #define MAX_MIPS 16
 #define MAX_SWAPCHAIN_IMAGES 8
@@ -66,6 +85,7 @@ typedef struct VkFeatureChain
 
     // ---- add this ----
     VkPhysicalDeviceMaintenance5FeaturesKHR maintenance5;
+    VkPhysicalDeviceShaderNonSemanticInfoFeaturesKHR shaderNonSemanticInfo;
 } VkFeatureChain;
 
 
@@ -109,6 +129,7 @@ typedef struct
 
     VkImageUsageFlags swapchain_extra_usage_flags; /* Additional usage flags */
     bool              vsync;
+    bool              enable_debug_printf; /* Enable VK_KHR_shader_non_semantic_info for shader debug printf */
 } RendererDesc;
 
 
@@ -415,9 +436,6 @@ void vk_create_swapchain(VkDevice                       device,
                          VkQueue                        graphics_queue,
                          VkCommandPool                  one_time_pool);
 void vk_swapchain_destroy(VkDevice device, FlowSwapchain* swapchain);
-bool vk_swapchain_acquire(VkDevice device, FlowSwapchain* sc, VkSemaphore image_available, VkFence fence, uint64_t timeout);
-
-bool vk_swapchain_present(VkQueue present_queue, FlowSwapchain* sc, const VkSemaphore* waits, uint32_t wait_count);
 
 void vk_swapchain_recreate(VkDevice device, VkPhysicalDevice gpu, FlowSwapchain* sc, uint32_t new_w, uint32_t new_h, VkQueue graphics_queue, VkCommandPool one_time_pool);
 VkPresentModeKHR vk_swapchain_select_present_mode(VkPhysicalDevice physical_device, VkSurfaceKHR surface, bool vsync);
@@ -455,9 +473,48 @@ void cmd_transition_mip(VkCommandBuffer       cmd,
                         VkImageLayout         newLayout,
                         uint32_t              newQueueFamily);
 
+
+FORCE_INLINE bool vk_swapchain_acquire(VkDevice device, FlowSwapchain* sc, VkSemaphore image_available, VkFence fence, uint64_t timeout)
+{
+    VkResult r = vkAcquireNextImageKHR(device, sc->swapchain, timeout, image_available, fence, &sc->current_image);
+
+    if(r == VK_SUCCESS)
+        return true;
+
+    if(r == VK_SUBOPTIMAL_KHR || r == VK_ERROR_OUT_OF_DATE_KHR)
+    {
+        sc->needs_recreate = true;
+        return false;
+    }
+
+    VK_CHECK(r);
+    return false;
+}
+
+FORCE_INLINE bool vk_swapchain_present(VkQueue present_queue, FlowSwapchain* sc, const VkSemaphore* waits, uint32_t wait_count)
+{
+    VkPresentInfoKHR info = {.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+                             .waitSemaphoreCount = wait_count,
+                             .pWaitSemaphores    = waits,
+                             .swapchainCount     = 1,
+                             .pSwapchains        = &sc->swapchain,
+                             .pImageIndices      = &sc->current_image};
+
+    VkResult r = vkQueuePresentKHR(present_queue, &info);
+
+    if(r == VK_SUBOPTIMAL_KHR || r == VK_ERROR_OUT_OF_DATE_KHR)
+    {
+        sc->needs_recreate = true;
+        return false;
+    }
+
+    VK_CHECK(r);
+    return true;
+}
+
 typedef struct
 {
-    uint32_t handle; 
+    uint32_t handle;
     uint32_t generation;
 } BufferHandle;
 typedef struct
@@ -754,3 +811,5 @@ typedef struct
 // Submit command buffer
 // Present swapchain image
 // Advance frame index
+//
+//

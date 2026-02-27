@@ -28,14 +28,12 @@ VSOutput vs_main(uint vertexID : SV_VertexID)
     o.position = float4(v.pos, 0, 1);
     o.color = v.color;
 
-#if DEBUG_PRINTF
     // Debug Printf: limit output to avoid flooding
     if (vertexID == 0)
     {
         printf("Vertex %u pos=(%f, %f) color=(%f, %f, %f)\n",
                vertexID, v.pos.x, v.pos.y, v.color.r, v.color.g, v.color.b);
     }
-#endif
 
     return o;
 }
