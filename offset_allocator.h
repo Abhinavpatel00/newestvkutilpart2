@@ -88,11 +88,21 @@ void oa_destroy(OA_Allocator* allocator);
 void oa_reset(OA_Allocator* allocator);
 
 OA_Allocation oa_allocate(OA_Allocator* allocator, oa_uint32 size);
+OA_Allocation oa_allocate_aligned(OA_Allocator* allocator, oa_uint32 size, oa_uint32 alignment);
 void oa_free(OA_Allocator* allocator, OA_Allocation allocation);
 
 oa_uint32 oa_allocation_size(const OA_Allocator* allocator, OA_Allocation allocation);
 OA_StorageReport oa_storage_report(const OA_Allocator* allocator);
 OA_StorageReportFull oa_storage_report_full(const OA_Allocator* allocator);
+
+#ifdef DEBUG
+void oa_debug_validate(const OA_Allocator* allocator);
+#else
+static inline void oa_debug_validate(const OA_Allocator* allocator)
+{
+    (void)allocator;
+}
+#endif
 
 #ifdef __cplusplus
 }

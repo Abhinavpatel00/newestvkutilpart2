@@ -1,3 +1,8 @@
+// Silence DEBUG_PRINTF warnings when not defined by the build.
+#ifndef DEBUG_PRINTF
+#define DEBUG_PRINTF 0
+#endif
+
 struct Vertex
 {
     float2 pos;
@@ -19,21 +24,21 @@ struct PushConstants
 PushConstants push;
 
 [shader("vertex")]
-VSOutput vs_main(uint vertexID : SV_VertexID)
+VSOutput vs_main(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
 {
     VSOutput o;
 
-    Vertex v = push.vertexBuffer[vertexID];
+    uint globalVertexID = instanceID * 3 + vertexID;
+    Vertex v = push.vertexBuffer[globalVertexID];
 
     o.position = float4(v.pos, 0, 1);
     o.color = v.color;
 
-#if DEBUG_PRINTF
+#if defined(DEBUG_PRINTF) && DEBUG_PRINTF
     // Debug Printf: limit output to avoid flooding
-    if (vertexID == 0)
     {
-        printf("Vertex %u pos=(%f, %f) color=(%f, %f, %f)\n",
-               vertexID, v.pos.x, v.pos.y, v.color.r, v.color.g, v.color.b);
+        printf("Instance %u Vertex %u Global %u pos=(%f, %f) color=(%f, %f, %f)\n",
+               instanceID, vertexID, globalVertexID, v.pos.x, v.pos.y, v.color.r, v.color.g, v.color.b);
     }
 #endif
 

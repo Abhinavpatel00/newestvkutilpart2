@@ -2,6 +2,7 @@
 #include "tinytypes.h"
 #include "vk_default.h"
 #include "helpers.h"
+#include "offset_allocator.h"
 #include <stdint.h>
 #include <vulkan/vulkan_core.h>
 #include "cachestuff.h"
@@ -84,7 +85,7 @@ typedef struct VkFeatureChain
 
 
     // ---- add this ----
-    VkPhysicalDeviceMaintenance5FeaturesKHR maintenance5;
+    VkPhysicalDeviceMaintenance5FeaturesKHR          maintenance5;
     VkPhysicalDeviceShaderNonSemanticInfoFeaturesKHR shaderNonSemanticInfo;
 } VkFeatureChain;
 
@@ -266,6 +267,39 @@ typedef struct
 
     //  RenderTarget depth[MAX_SWAPCHAIN_IMAGES];
 } Renderer;
+
+typedef struct BufferPool
+{
+    VkBuffer                 buffer;
+    VmaAllocation            allocation;
+    VkDeviceSize             size_bytes;
+    VkBufferUsageFlags       usage;
+    VmaMemoryUsage           memory_usage;
+    VmaAllocationCreateFlags alloc_flags;
+    void*                    mapped;
+    OA_Allocator             allocator;
+} BufferPool;
+
+typedef struct BufferSlice
+{
+    BufferPool*   pool;
+    VkBuffer      buffer;
+    VkDeviceSize  offset;
+    VkDeviceSize  size;
+    void*         mapped;
+    OA_Allocation allocation;
+} BufferSlice;
+
+bool        buffer_pool_init(Renderer*                r,
+                             BufferPool*              pool,
+                             VkDeviceSize             size_bytes,
+                             VkBufferUsageFlags       usage,
+                             VmaMemoryUsage           memory_usage,
+                             VmaAllocationCreateFlags alloc_flags,
+                             oa_uint32                max_allocs);
+void        buffer_pool_destroy(Renderer* r, BufferPool* pool);
+BufferSlice buffer_pool_alloc(BufferPool* pool, VkDeviceSize size_bytes, VkDeviceSize alignment);
+void        buffer_pool_free(BufferSlice slice);
 
 #define MAX_VERTEX_ATTRS 8
 typedef enum VertexFormat

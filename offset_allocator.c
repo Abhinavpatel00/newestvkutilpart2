@@ -129,6 +129,11 @@ static oa_uint32 oa_find_lowest_set_bit_after(oa_uint32 bitMask, oa_uint32 start
     return oa_tzcnt_nonzero(bitsAfter);
 }
 
+static oa_uint32 oa_align_up(oa_uint32 value, oa_uint32 alignment)
+{
+    return (value + alignment - 1u) & ~(alignment - 1u);
+}
+
 static oa_uint32 oa_insert_node_into_bin(OA_Allocator* allocator, oa_uint32 size, oa_uint32 dataOffset)
 {
     oa_uint32 binIndex = oa_uint_to_float_round_down(size);
@@ -207,6 +212,38 @@ static void oa_remove_node_from_bin(OA_Allocator* allocator, oa_uint32 nodeIndex
 #endif
 }
 
+static void oa_unlink_node_from_bin(OA_Allocator* allocator, oa_uint32 nodeIndex)
+{
+    OA_Node* node = &allocator->nodes[nodeIndex];
+
+    if(node->bin_list_prev != OA_NODE_UNUSED)
+    {
+        allocator->nodes[node->bin_list_prev].bin_list_next = node->bin_list_next;
+        if(node->bin_list_next != OA_NODE_UNUSED)
+            allocator->nodes[node->bin_list_next].bin_list_prev = node->bin_list_prev;
+    }
+    else
+    {
+        oa_uint32 binIndex = oa_uint_to_float_round_down(node->data_size);
+        oa_uint32 topBinIndex = binIndex >> OA_TOP_BINS_INDEX_SHIFT;
+        oa_uint32 leafBinIndex = binIndex & OA_LEAF_BINS_INDEX_MASK;
+
+        allocator->bin_indices[binIndex] = node->bin_list_next;
+        if(node->bin_list_next != OA_NODE_UNUSED)
+            allocator->nodes[node->bin_list_next].bin_list_prev = OA_NODE_UNUSED;
+
+        if(allocator->bin_indices[binIndex] == OA_NODE_UNUSED)
+        {
+            allocator->used_bins[topBinIndex] &= ~(1u << leafBinIndex);
+            if(allocator->used_bins[topBinIndex] == 0)
+                allocator->used_bins_top &= ~(1u << topBinIndex);
+        }
+    }
+
+    node->bin_list_prev = OA_NODE_UNUSED;
+    node->bin_list_next = OA_NODE_UNUSED;
+}
+
 // ------------------------------------------------------------
 // Public API
 // ------------------------------------------------------------
@@ -270,6 +307,8 @@ void oa_reset(OA_Allocator* allocator)
         allocator->free_nodes[i] = (OA_NodeIndex)(allocator->max_allocs - i - 1u);
 
     oa_insert_node_into_bin(allocator, allocator->size, 0);
+
+    oa_debug_validate(allocator);
 }
 
 OA_Allocation oa_allocate(OA_Allocator* allocator, oa_uint32 size)
@@ -335,7 +374,129 @@ OA_Allocation oa_allocate(OA_Allocator* allocator, oa_uint32 size)
         node->neighbor_next = (OA_NodeIndex)newNodeIndex;
     }
 
+    oa_debug_validate(allocator);
     return (OA_Allocation){ .offset = node->data_offset, .metadata = (OA_NodeIndex)nodeIndex };
+}
+
+OA_Allocation oa_allocate_aligned(OA_Allocator* allocator, oa_uint32 size, oa_uint32 alignment)
+{
+    if(!allocator)
+        return (OA_Allocation){ .offset = OA_NO_SPACE, .metadata = OA_NODE_UNUSED };
+
+    if(allocator->free_offset == 0)
+        return (OA_Allocation){ .offset = OA_NO_SPACE, .metadata = OA_NODE_UNUSED };
+
+    if(alignment == 0)
+        alignment = 1u;
+
+    OA_ASSERT((alignment & (alignment - 1u)) == 0);
+
+    oa_uint32 minBinIndex = oa_uint_to_float_round_up(size);
+    oa_uint32 minTopBinIndex = minBinIndex >> OA_TOP_BINS_INDEX_SHIFT;
+    oa_uint32 minLeafBinIndex = minBinIndex & OA_LEAF_BINS_INDEX_MASK;
+
+    oa_uint32 selectedNodeIndex = OA_NODE_UNUSED;
+    oa_uint32 alignedOffset = 0;
+    oa_uint32 leadingSize = 0;
+    oa_uint32 trailingSize = 0;
+
+    for(oa_uint32 topBinIndex = minTopBinIndex; topBinIndex < OA_NUM_TOP_BINS; topBinIndex++)
+    {
+        if((allocator->used_bins_top & (1u << topBinIndex)) == 0)
+        {
+            minLeafBinIndex = 0;
+            continue;
+        }
+
+        oa_uint32 leafMask = allocator->used_bins[topBinIndex];
+        oa_uint32 leafBinIndex = oa_find_lowest_set_bit_after(leafMask, minLeafBinIndex);
+        while(leafBinIndex != OA_NO_SPACE)
+        {
+            oa_uint32 binIndex = (topBinIndex << OA_TOP_BINS_INDEX_SHIFT) | leafBinIndex;
+            oa_uint32 nodeIndex = allocator->bin_indices[binIndex];
+            while(nodeIndex != OA_NODE_UNUSED)
+            {
+                OA_Node* node = &allocator->nodes[nodeIndex];
+                oa_uint32 nodeStart = node->data_offset;
+                oa_uint32 nodeEnd = node->data_offset + node->data_size;
+                oa_uint32 aligned = oa_align_up(nodeStart, alignment);
+
+                if(aligned + size <= nodeEnd)
+                {
+                    oa_uint32 lead = aligned - nodeStart;
+                    oa_uint32 trail = nodeEnd - (aligned + size);
+                    oa_uint32 neededNodes = (lead > 0 ? 1u : 0u) + (trail > 0 ? 1u : 0u);
+                    oa_uint32 availableNodes = allocator->free_offset + 1u;
+
+                    if(neededNodes <= availableNodes)
+                    {
+                        selectedNodeIndex = nodeIndex;
+                        alignedOffset = aligned;
+                        leadingSize = lead;
+                        trailingSize = trail;
+                        goto oa_aligned_found;
+                    }
+                }
+
+                nodeIndex = node->bin_list_next;
+            }
+
+            leafBinIndex = oa_find_lowest_set_bit_after(leafMask, leafBinIndex + 1u);
+        }
+
+        minLeafBinIndex = 0;
+    }
+
+    return (OA_Allocation){ .offset = OA_NO_SPACE, .metadata = OA_NODE_UNUSED };
+
+oa_aligned_found:
+    {
+        OA_Node* node = &allocator->nodes[selectedNodeIndex];
+        oa_uint32 nodeTotalSize = node->data_size;
+
+        oa_unlink_node_from_bin(allocator, selectedNodeIndex);
+        allocator->free_storage -= nodeTotalSize;
+
+        OA_NodeIndex neighborPrev = node->neighbor_prev;
+        OA_NodeIndex neighborNext = node->neighbor_next;
+
+        node->data_offset = alignedOffset;
+        node->data_size = size;
+        node->used = true;
+
+        if(leadingSize > 0)
+        {
+            oa_uint32 leadingNodeIndex = oa_insert_node_into_bin(allocator, leadingSize, alignedOffset - leadingSize);
+            allocator->nodes[leadingNodeIndex].neighbor_prev = neighborPrev;
+            allocator->nodes[leadingNodeIndex].neighbor_next = (OA_NodeIndex)selectedNodeIndex;
+            node->neighbor_prev = (OA_NodeIndex)leadingNodeIndex;
+
+            if(neighborPrev != OA_NODE_UNUSED)
+                allocator->nodes[neighborPrev].neighbor_next = (OA_NodeIndex)leadingNodeIndex;
+        }
+        else
+        {
+            node->neighbor_prev = neighborPrev;
+        }
+
+        if(trailingSize > 0)
+        {
+            oa_uint32 trailingNodeIndex = oa_insert_node_into_bin(allocator, trailingSize, alignedOffset + size);
+            allocator->nodes[trailingNodeIndex].neighbor_prev = (OA_NodeIndex)selectedNodeIndex;
+            allocator->nodes[trailingNodeIndex].neighbor_next = neighborNext;
+            node->neighbor_next = (OA_NodeIndex)trailingNodeIndex;
+
+            if(neighborNext != OA_NODE_UNUSED)
+                allocator->nodes[neighborNext].neighbor_prev = (OA_NodeIndex)trailingNodeIndex;
+        }
+        else
+        {
+            node->neighbor_next = neighborNext;
+        }
+
+        oa_debug_validate(allocator);
+        return (OA_Allocation){ .offset = node->data_offset, .metadata = (OA_NodeIndex)selectedNodeIndex };
+    }
 }
 
 void oa_free(OA_Allocator* allocator, OA_Allocation allocation)
@@ -395,6 +556,8 @@ void oa_free(OA_Allocator* allocator, OA_Allocation allocation)
         allocator->nodes[combinedNodeIndex].neighbor_prev = (OA_NodeIndex)neighborPrev;
         allocator->nodes[neighborPrev].neighbor_next = (OA_NodeIndex)combinedNodeIndex;
     }
+
+    oa_debug_validate(allocator);
 }
 
 oa_uint32 oa_allocation_size(const OA_Allocator* allocator, OA_Allocation allocation)
@@ -449,3 +612,53 @@ OA_StorageReportFull oa_storage_report_full(const OA_Allocator* allocator)
     }
     return report;
 }
+
+#ifdef DEBUG
+void oa_debug_validate(const OA_Allocator* allocator)
+{
+    if(!allocator || !allocator->nodes)
+        return;
+
+    oa_uint32 computedFreeStorage = 0;
+    oa_uint32 computedUsedBinsTop = 0;
+    oa_uint8 computedUsedBins[OA_NUM_TOP_BINS];
+    memset(computedUsedBins, 0, sizeof(computedUsedBins));
+
+    for(oa_uint32 binIndex = 0; binIndex < OA_NUM_LEAF_BINS; binIndex++)
+    {
+        oa_uint32 topBinIndex = binIndex >> OA_TOP_BINS_INDEX_SHIFT;
+        oa_uint32 leafBinIndex = binIndex & OA_LEAF_BINS_INDEX_MASK;
+
+        oa_uint32 nodeIndex = allocator->bin_indices[binIndex];
+        if(nodeIndex != OA_NODE_UNUSED)
+            computedUsedBins[topBinIndex] |= (1u << leafBinIndex);
+
+        while(nodeIndex != OA_NODE_UNUSED)
+        {
+            OA_Node* node = &allocator->nodes[nodeIndex];
+
+            OA_ASSERT(node->used == false);
+            OA_ASSERT(oa_uint_to_float_round_down(node->data_size) == binIndex);
+
+            if(node->bin_list_prev != OA_NODE_UNUSED)
+                OA_ASSERT(allocator->nodes[node->bin_list_prev].bin_list_next == nodeIndex);
+            if(node->bin_list_next != OA_NODE_UNUSED)
+                OA_ASSERT(allocator->nodes[node->bin_list_next].bin_list_prev == nodeIndex);
+
+            computedFreeStorage += node->data_size;
+            nodeIndex = node->bin_list_next;
+        }
+    }
+
+    for(oa_uint32 topBinIndex = 0; topBinIndex < OA_NUM_TOP_BINS; topBinIndex++)
+    {
+        if(computedUsedBins[topBinIndex] != 0)
+            computedUsedBinsTop |= (1u << topBinIndex);
+    }
+
+    OA_ASSERT(computedFreeStorage == allocator->free_storage);
+    OA_ASSERT(computedUsedBinsTop == allocator->used_bins_top);
+    for(oa_uint32 i = 0; i < OA_NUM_TOP_BINS; i++)
+        OA_ASSERT(computedUsedBins[i] == allocator->used_bins[i]);
+}
+#endif

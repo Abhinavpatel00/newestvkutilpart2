@@ -35,7 +35,10 @@ for file in "$SRC_DIR"/*.slang; do
 
     compile_stage vertex   vs_main "$file" "$OUT_DIR/$name.vert.spv"
     compile_stage fragment fs_main "$file" "$OUT_DIR/$name.frag.spv"
-    compile_stage compute  cs_main "$file" "$OUT_DIR/$name.comp.spv" || true
+
+    if grep -q "\bcs_main\b" "$file"; then
+        compile_stage compute  cs_main "$file" "$OUT_DIR/$name.comp.spv"
+    fi
 
 done
 

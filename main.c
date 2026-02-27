@@ -305,13 +305,13 @@ int main()
     const char** glfw_exts      = glfwGetRequiredInstanceExtensions(&glfw_ext_count);
 
     // To enable Debug Printf:
-    // 1. Set .enable_debug_printf             = false in RendererDesc
+    // 1. Set .enable_debug_printf             = true in RendererDesc
     // 2. In your shader, add: #extension GL_EXT_debug_printf : enable (GLSL)
     //    or just use printf() in HLSL/Slang
     // 3. Add debugPrintfEXT("My value: %f", myvar) in GLSL
     //    or printf("My value: %f", myvar) in HLSL/Slang
     // 4. View output in RenderDoc or Validation Layers
-    
+
     RendererDesc desc = {
         .app_name            = "My Renderer",
         .instance_layers     = NULL,
@@ -335,7 +335,7 @@ int main()
         .swapchain_preferred_format      = VK_FORMAT_B8G8R8A8_UNORM,
         .swapchain_extra_usage_flags     = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
         .vsync                           = false,
-        .enable_debug_printf             = false, // Enable shader debug printf
+        .enable_debug_printf             = false,  // Enable shader debug printf
     };
     Renderer          renderer         = {0};
     RendererPipelines render_pipelines = {0};
@@ -347,6 +347,9 @@ int main()
     cfg.frag_path                                 = "compiledshaders/triangle.frag.spv";
     cfg.color_attachment_count                    = 1;
     cfg.color_formats                             = &renderer.swapchain.format;
+    cfg.use_vertex_input                          = false;
+    cfg.depth_test_enable                         = false;
+    cfg.depth_write_enable                        = false;
     render_pipelines.pipelines[TRIANGLE_PIPELINE] = create_graphics_pipeline(&renderer, &cfg);
     typedef struct
     {
@@ -354,46 +357,63 @@ int main()
         float color[3];
     } Vertex;
 
-    Vertex*       cpu_vertices;
-    VkBuffer      vertex_buffer;
-    VmaAllocation alloc;
+    BufferPool pool = {0};
+    buffer_pool_init(&renderer, &pool, 16 * 1024 * 1024,
+                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+                     VMA_MEMORY_USAGE_AUTO,
+                     VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT, 2048);
 
-    VkBufferCreateInfo ci = {
-        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size  = sizeof(Vertex) * 55555 * 3,
-        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-    };
+    const uint32_t grid_x     = 128;
+    const uint32_t grid_y     = 72;
+    const uint32_t tri_count  = grid_x * grid_y;
+    const uint32_t vert_count = tri_count * 3;
+    const uint32_t draw_count = 1;
 
-    VmaAllocationCreateInfo aci = {.usage = VMA_MEMORY_USAGE_AUTO,
-                                   .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+    BufferSlice vertex_slice   = buffer_pool_alloc(&pool, sizeof(Vertex) * vert_count, 16);
+    BufferSlice indirect_slice = buffer_pool_alloc(&pool, sizeof(VkDrawIndirectCommand) * draw_count, 16);
+    BufferSlice count_slice    = buffer_pool_alloc(&pool, sizeof(uint32_t), 4);
 
-    VmaAllocationInfo info;
+    Vertex*                cpu_vertices = (Vertex*)vertex_slice.mapped;
+    VkDrawIndirectCommand* cpu_indirect = (VkDrawIndirectCommand*)indirect_slice.mapped;
+    uint32_t*              cpu_count    = (uint32_t*)count_slice.mapped;
 
-    vmaCreateBuffer(renderer.vmaallocator, &ci, &aci, &vertex_buffer, &alloc, &info);
-
-    cpu_vertices = info.pMappedData;
-    int index    = 0;
-
-    for(int y = 0; y < 23; y++)
-        for(int x = 0; x < 23; x++)
+    uint32_t index  = 0;
+    float    cell_w = 2.0f / (float)grid_x;
+    float    cell_h = 2.0f / (float)grid_y;
+    float    tri_w  = cell_w * 0.9f;
+    float    tri_h  = cell_h * 0.9f;
+    for(uint32_t y = 0; y < grid_y; y++)
+        for(uint32_t x = 0; x < grid_x; x++)
         {
-            float fx = x * 0.1f;
-            float fy = y * 0.1f;
+            float base_x = -1.0f + (float)x * cell_w;
+            float base_y = -1.0f + (float)y * cell_h;
 
-            cpu_vertices[index++] = (Vertex){{fx, fy}, {4, 0, 0}};
-            cpu_vertices[index++] = (Vertex){{fx + 0.005f, fy}, {0, 1, 0}};
-            cpu_vertices[index++] = (Vertex){{fx, fy + 0.005f}, {0, 0, 1}};
+            cpu_vertices[index++] = (Vertex){{base_x, base_y}, {1, 0, 0}};
+            cpu_vertices[index++] = (Vertex){{base_x + tri_w, base_y}, {0, 1, 0}};
+            cpu_vertices[index++] = (Vertex){{base_x, base_y + tri_h}, {0, 0, 1}};
         }
 
+    cpu_indirect[0] = (VkDrawIndirectCommand){
+        .vertexCount   = 3,
+        .instanceCount = tri_count,
+        .firstVertex   = 0,
+        .firstInstance = 0,
+    };
 
-    VkBufferDeviceAddressInfo addrInfo = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = vertex_buffer};
+    *cpu_count = draw_count;
 
-    VkDeviceAddress gpu_address = vkGetBufferDeviceAddress(renderer.device, &addrInfo);
+    vmaFlushAllocation(renderer.vmaallocator, pool.allocation, vertex_slice.offset, vertex_slice.size);
+    vmaFlushAllocation(renderer.vmaallocator, pool.allocation, indirect_slice.offset, indirect_slice.size);
+    vmaFlushAllocation(renderer.vmaallocator, pool.allocation, count_slice.offset, count_slice.size);
+
+    VkBufferDeviceAddressInfo addrInfo = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = pool.buffer};
+    VkDeviceAddress           gpu_address = vkGetBufferDeviceAddress(renderer.device, &addrInfo) + vertex_slice.offset;
 
 
     typedef struct
     {
         VkDeviceAddress vertex_ptr;
+        uint8_t         padding[256 - sizeof(VkDeviceAddress)];
     } Push;
     while(!glfwWindowShouldClose(renderer.window))
     {
@@ -458,19 +478,18 @@ int main()
             vkCmdBeginRendering(cmd, &rendering);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, render_pipelines.pipelines[TRIANGLE_PIPELINE]);
             vk_cmd_set_viewport_scissor(cmd, renderer.swapchain.extent);
-            struct
-            {
-                VkDeviceAddress vertex_ptr;
-            } push = {gpu_address};
-            vkCmdPushConstants(cmd, renderer.bindless_system.pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
-            vkCmdDraw(cmd, 55555 * 3, 1, 0, 0);
+            Push push = {gpu_address, {0}};
+            vkCmdPushConstants(cmd, renderer.bindless_system.pipeline_layout, VK_SHADER_STAGE_ALL, 0, sizeof(Push), &push);
+            vkCmdDrawIndirectCount(cmd, indirect_slice.buffer, indirect_slice.offset, count_slice.buffer,
+                                   count_slice.offset, draw_count, sizeof(VkDrawIndirectCommand));
+            vkCmdEndRendering(cmd);
         }
 
         image_transition_swapchain(renderer.frames[renderer.current_frame].cmdbuf, &renderer.swapchain,
                                    VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0);
         vk_cmd_end(renderer.frames[renderer.current_frame].cmdbuf);
-        
-	{
+
+        {
             VkCommandBufferSubmitInfo cmd_info = {
                 .sType         = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
                 .commandBuffer = renderer.frames[renderer.current_frame].cmdbuf,
@@ -509,7 +528,7 @@ int main()
         renderer.current_frame = (renderer.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 
-
+    printf("%zu", sizeof(BufferSlice));
     //    ANALYZE_STRUCT(ImageState);
     //renderer_destroy(&renderer);
     return 0;

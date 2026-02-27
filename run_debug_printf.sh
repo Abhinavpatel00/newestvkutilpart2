@@ -13,7 +13,7 @@ SLANG_DEFINES="-DDEBUG_PRINTF=1" ./compileslang.sh
 
 # Build app
 ./nob
-
+export VK_LAYER_PRINTF_BUFFER_SIZE=525312 
 # Run with Debug Printf enabled in validation layers
 export VK_LAYER_PRINTF_ONLY_PRESET=1
 export VK_LAYER_PRINTF_TO_STDOUT=1

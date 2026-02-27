@@ -904,6 +904,34 @@ void renderer_create(Renderer* r, RendererDesc* desc)
         apply_caps(&r->info.feature_chain, &caps);
     }
 
+    if(!desc->use_custom_features)
+    {
+        r->info.feature_chain.core.pNext = &r->info.feature_chain.v11;
+        r->info.feature_chain.v11.pNext  = &r->info.feature_chain.v12;
+        r->info.feature_chain.v12.pNext  = &r->info.feature_chain.v13;
+        r->info.feature_chain.v13.pNext  = NULL;
+
+        VkBaseOutStructure* tail = (VkBaseOutStructure*)&r->info.feature_chain.v13;
+
+        if(device_has_extension(r->physical_device, VK_KHR_MAINTENANCE_5_EXTENSION_NAME))
+        {
+            r->info.feature_chain.maintenance5.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR;
+            r->info.feature_chain.maintenance5.pNext = NULL;
+            tail->pNext = (VkBaseOutStructure*)&r->info.feature_chain.maintenance5;
+            tail = (VkBaseOutStructure*)&r->info.feature_chain.maintenance5;
+        }
+
+        if(desc->enable_debug_printf && device_has_extension(r->physical_device, VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME))
+        {
+            r->info.feature_chain.shaderNonSemanticInfo.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_NON_SEMANTIC_INFO_FEATURES_KHR;
+            r->info.feature_chain.shaderNonSemanticInfo.pNext = NULL;
+            tail->pNext = (VkBaseOutStructure*)&r->info.feature_chain.shaderNonSemanticInfo;
+            tail = (VkBaseOutStructure*)&r->info.feature_chain.shaderNonSemanticInfo;
+        }
+
+        tail->pNext = NULL;
+    }
+
     //
     // 5. Find Queue Families
     //
@@ -1202,6 +1230,109 @@ void renderer_destroy(Renderer* r)
     vkDestroyPipelineCache(r->device, r->pipeline_cache, NULL);
 
     vkDestroyDevice(r->device, NULL);
+}
+
+bool buffer_pool_init(Renderer* r,
+                      BufferPool* pool,
+                      VkDeviceSize size_bytes,
+                      VkBufferUsageFlags usage,
+                      VmaMemoryUsage memory_usage,
+                      VmaAllocationCreateFlags alloc_flags,
+                      oa_uint32 max_allocs)
+{
+    if(!r || !pool || size_bytes == 0)
+        return false;
+
+    if(size_bytes > UINT32_MAX)
+    {
+        log_error("[buffer_pool] size exceeds 4GB: %llu", (unsigned long long)size_bytes);
+        return false;
+    }
+
+    memset(pool, 0, sizeof(*pool));
+
+    VkBufferCreateInfo buffer_info = {
+        .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size        = size_bytes,
+        .usage       = usage,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+
+    VmaAllocationCreateInfo alloc_info = {
+        .usage = memory_usage,
+        .flags = alloc_flags,
+    };
+
+    VmaAllocationInfo out_info = {0};
+    VkResult res = vmaCreateBuffer(r->vmaallocator, &buffer_info, &alloc_info, &pool->buffer, &pool->allocation, &out_info);
+    if(res != VK_SUCCESS)
+    {
+        log_error("[buffer_pool] vmaCreateBuffer failed: %d", res);
+        return false;
+    }
+
+    pool->size_bytes  = size_bytes;
+    pool->usage       = usage;
+    pool->memory_usage = memory_usage;
+    pool->alloc_flags = alloc_flags;
+    pool->mapped      = out_info.pMappedData;
+
+    oa_init(&pool->allocator, (oa_uint32)size_bytes, max_allocs);
+
+    return true;
+}
+
+void buffer_pool_destroy(Renderer* r, BufferPool* pool)
+{
+    if(!r || !pool)
+        return;
+
+    oa_destroy(&pool->allocator);
+
+    if(pool->buffer != VK_NULL_HANDLE)
+        vmaDestroyBuffer(r->vmaallocator, pool->buffer, pool->allocation);
+
+    memset(pool, 0, sizeof(*pool));
+}
+
+BufferSlice buffer_pool_alloc(BufferPool* pool, VkDeviceSize size_bytes, VkDeviceSize alignment)
+{
+    BufferSlice slice = {0};
+
+    if(!pool || size_bytes == 0)
+        return slice;
+
+    if(alignment == 0)
+        alignment = 1;
+
+    if(size_bytes > UINT32_MAX || alignment > UINT32_MAX)
+        return slice;
+
+    OA_Allocation allocation = (alignment > 1)
+                                  ? oa_allocate_aligned(&pool->allocator, (oa_uint32)size_bytes, (oa_uint32)alignment)
+                                  : oa_allocate(&pool->allocator, (oa_uint32)size_bytes);
+
+    if(allocation.offset == OA_NO_SPACE)
+        return slice;
+
+    slice.pool       = pool;
+    slice.buffer     = pool->buffer;
+    slice.offset     = allocation.offset;
+    slice.size       = size_bytes;
+    slice.allocation = allocation;
+
+    if(pool->mapped)
+        slice.mapped = (void*)((uint8_t*)pool->mapped + allocation.offset);
+
+    return slice;
+}
+
+void buffer_pool_free(BufferSlice slice)
+{
+    if(!slice.pool)
+        return;
+
+    oa_free(&slice.pool->allocator, slice.allocation);
 }
 
 VkSurfaceCapabilities2KHR query_surface_capabilities(VkPhysicalDevice gpu, VkSurfaceKHR surface)
