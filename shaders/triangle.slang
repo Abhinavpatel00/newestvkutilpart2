@@ -5,48 +5,52 @@
 
 struct Vertex
 {
-    float2 pos;
-    float3 color;
+  float2 pos;
+  float3 color;
 };
 
 struct VSOutput
 {
-    float4 position : SV_Position;
-    float3 color    : COLOR0;
+  float4 position : SV_Position;
+  float3 color : COLOR0;
 };
 
 struct PushConstants
 {
-    Vertex* vertexBuffer;
+  Vertex* vertexBuffer;
+  float   aspect;
 };
 
 [[vk::push_constant]]
 PushConstants push;
 
 [shader("vertex")]
-VSOutput vs_main(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
+VSOutput vs_main(uint vertexID: SV_VertexID, uint instanceID: SV_InstanceID)
 {
-    VSOutput o;
+  VSOutput o;
 
-    uint globalVertexID = instanceID * 3 + vertexID;
-    Vertex v = push.vertexBuffer[globalVertexID];
+  uint   globalVertexID = instanceID * 3 + vertexID;
+  Vertex v              = push.vertexBuffer[globalVertexID];
+  float2 pos = v.pos;
+  pos.x /= push.aspect;  // compensate for wide screens
 
-    o.position = float4(v.pos, 0, 1);
-    o.color = v.color;
+  o.position = float4(pos, 0, 1);
+  o.color    = v.color;
 
 #if defined(DEBUG_PRINTF) && DEBUG_PRINTF
-    // Debug Printf: limit output to avoid flooding
-    {
-        printf("Instance %u Vertex %u Global %u pos=(%f, %f) color=(%f, %f, %f)\n",
-               instanceID, vertexID, globalVertexID, v.pos.x, v.pos.y, v.color.r, v.color.g, v.color.b);
-    }
+  // Debug Printf: limit output to avoid flooding
+  {
+    printf("Instance %u Vertex %u Global %u pos=(%f, %f) color=(%f, %f, %f)\n", instanceID, vertexID, globalVertexID,
+           v.pos.x, v.pos.y, v.color.r, v.color.g, v.color.b);
+  }
 #endif
 
-    return o;
+  return o;
 }
 
 [shader("fragment")]
-float4 fs_main(VSOutput input) : SV_Target0
+float4 fs_main(VSOutput input)
+    : SV_Target0
 {
-    return float4(input.color, 1);
+  return float4(input.color, 1);
 }

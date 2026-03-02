@@ -1,10 +1,29 @@
 #pragma once
-#include "tinytypes.h"
+#define IMGUI_IMPL_VULKAN_MINIMUM_IMAGE_SAMPLER_POOL_SIZE (1)
+#define IMGUI_IMPL_VULKAN_USE_VOLK
+#define CIMGUI_USE_GLFW
+#define CIMGUI_DEFINE_ENUMS_AND_STRUCTS
+#define CIMGUI_USE_VULKAN
+
+
 #include "vk_default.h"
+#ifdef Status
+#undef Status
+#endif
+
+
+#include "tinytypes.h"
+
+#include "external/cimgui/cimgui.h"
+
+#include "external/cimgui/cimgui_impl.h"
+
+
+
+
 #include "helpers.h"
 #include "offset_allocator.h"
 #include <stdint.h>
-#include <vulkan/vulkan_core.h>
 #include "cachestuff.h"
 
 // Fallback for older Vulkan headers without VK_KHR_shader_non_semantic_info
@@ -131,6 +150,11 @@ typedef struct
     VkImageUsageFlags swapchain_extra_usage_flags; /* Additional usage flags */
     bool              vsync;
     bool              enable_debug_printf; /* Enable VK_KHR_shader_non_semantic_info for shader debug printf */
+    uint32_t          bindless_sampled_image_count;
+    uint32_t          bindless_sampler_count;
+    uint32_t          bindless_storage_image_count;
+
+
 } RendererDesc;
 
 
@@ -226,6 +250,66 @@ typedef struct Bindless
     VkPipelineLayout pipeline_layout;
 
 } Bindless;
+
+
+#define MAX_DEFAULT_SAMPLERS 16
+
+typedef enum DefaultSamplerID
+{
+    SAMPLER_LINEAR_WRAP = 0,
+    SAMPLER_LINEAR_CLAMP,
+    SAMPLER_NEAREST_WRAP,
+    SAMPLER_NEAREST_CLAMP,
+    SAMPLER_LINEAR_WRAP_ANISO,
+    SAMPLER_SHADOW,
+    SAMPLER_COUNT
+} DefaultSamplerID;
+
+typedef struct DefaultSamplerTable
+{
+    VkSampler samplers[SAMPLER_COUNT];
+} DefaultSamplerTable;
+
+// ────────────────────────────────────────────────────────────────
+// Render Targets
+// ────────────────────────────────────────────────────────────────
+
+#define RT_MAX_MIPS 13  // covers up to 4096x4096
+#define RT_POOL_MAX 64
+
+typedef struct RenderTarget
+{
+    VkImage       image;
+    VmaAllocation allocation;
+    VkImageView   view;                    // full mip chain view (for sampling)
+    VkImageView   mip_views[RT_MAX_MIPS];  // per-mip views (for attachments)
+
+    VkFormat              format;
+    uint32_t              width;
+    uint32_t              height;
+    uint32_t              mip_count;
+    VkSampleCountFlagBits samples;  // 0 = VK_SAMPLE_COUNT_1_BIT
+    VkImageUsageFlags     usage;
+    VkImageAspectFlags    aspect;
+
+    // Per-mip sync state — reuses existing ImageState
+    ImageState mip_states[RT_MAX_MIPS];
+
+    // Bindless integration
+    uint32_t sampled_id;  // bindless sampled image slot (UINT32_MAX if unused)
+    uint32_t storage_id;  // bindless storage image slot (UINT32_MAX if unused)
+} RenderTarget;
+
+
+
+typedef struct RenderTargetPool
+{
+    RenderTarget targets[RT_POOL_MAX];
+    bool         in_use[RT_POOL_MAX];
+    uint32_t     unused_frames[RT_POOL_MAX];
+    uint32_t     count;
+} RenderTargetPool;
+
 #define MAX_FRAMES_IN_FLIGHT 3
 typedef struct
 {
@@ -265,6 +349,9 @@ typedef struct
 
     VkPipelineCache pipeline_cache;
 
+    VkDescriptorPool imgui_pool;
+    RenderTarget hdr_color;
+    RenderTarget depth;
     //  RenderTarget depth[MAX_SWAPCHAIN_IMAGES];
 } Renderer;
 
@@ -847,3 +934,25 @@ typedef struct
 // Advance frame index
 //
 //
+//
+//
+//
+//
+//
+//
+//
+//
+//
+FORCE_INLINE void imgui_shutdown(void)
+{
+    ImGui_ImplVulkan_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    igDestroyContext(NULL);
+}
+
+FORCE_INLINE void imgui_begin_frame(void)
+{
+    ImGui_ImplVulkan_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    igNewFrame();
+}

@@ -250,15 +250,15 @@ void query_device_features(VkPhysicalDevice gpu, VkFeatureChain* out)
 
     // maintenance5 feature struct
     out->maintenance5.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR;
-    
+
     // shader non-semantic info feature struct (for debug printf)
     out->shaderNonSemanticInfo.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_NON_SEMANTIC_INFO_FEATURES_KHR;
 
     // Chain: core -> v11 -> v12 -> v13 -> maintenance5 -> shaderNonSemanticInfo
-    out->core.pNext = &out->v11;
-    out->v11.pNext  = &out->v12;
-    out->v12.pNext  = &out->v13;
-    out->v13.pNext  = &out->maintenance5;
+    out->core.pNext         = &out->v11;
+    out->v11.pNext          = &out->v12;
+    out->v12.pNext          = &out->v13;
+    out->v13.pNext          = &out->maintenance5;
     out->maintenance5.pNext = &out->shaderNonSemanticInfo;
 
     vkGetPhysicalDeviceFeatures2(gpu, &out->core);
@@ -354,9 +354,9 @@ static void apply_caps(VkFeatureChain* f, const RendererCaps* caps)
     {
         log_info("[features] unavailable: maintenance5 (VK_KHR_maintenance5)");
     }
-    
+
     TRY_ENABLE(debug_printf, f->shaderNonSemanticInfo.shaderNonSemanticInfo, "shaderNonSemanticInfo (Debug Printf)");
-    
+
     TRY_ENABLE(sampler_anisotropy, f->core.features.samplerAnisotropy, "samplerAnisotropy");
     TRY_ENABLE(dynamic_rendering, f->v13.dynamicRendering, "dynamic rendering");
     TRY_ENABLE(sync2, f->v13.synchronization2, "synchronization2");
@@ -710,6 +710,65 @@ static VkFormat pick_depth_format(VkPhysicalDevice gpu)
 
     return VK_FORMAT_UNDEFINED;
 }
+static PFN_vkVoidFunction imgui_vk_loader(const char* function_name, void* user_data)
+{
+    VkInstance instance = (VkInstance)user_data;
+    return vkGetInstanceProcAddr(instance, function_name);
+}
+
+void imgui_init(GLFWwindow*       window,
+                VkInstance        instance,
+                VkPhysicalDevice  gpu,
+                VkDevice          device,
+                uint32_t          queue_family,
+                VkQueue           queue,
+                VkDescriptorPool  imgui_pool,
+                uint32_t          min_image_count,
+                uint32_t          image_count,
+                VkFormat          swapchain_format,
+                VkFormat          depth_format,
+                VkImageUsageFlags swapchain_usage)
+{
+
+    igCreateContext(NULL);
+
+    ImGuiIO* io     = igGetIO_Nil();
+    io->IniFilename = NULL;
+    io->LogFilename = NULL;
+
+    igStyleColorsDark(NULL);
+
+    ImGui_ImplGlfw_InitForVulkan(window, true);
+
+    ImGui_ImplVulkan_LoadFunctions(VK_API_VERSION_1_3, imgui_vk_loader, instance);
+
+    ImGui_ImplVulkan_InitInfo info    = {0};
+    info.ApiVersion                   = VK_API_VERSION_1_3;
+    info.Instance                     = instance;
+    info.PhysicalDevice               = gpu;
+    info.Device                       = device;
+    info.QueueFamily                  = queue_family;
+    info.Queue                        = queue;
+    info.DescriptorPool               = imgui_pool;
+    info.MinImageCount                = min_image_count;
+    info.ImageCount                   = image_count;
+    info.UseDynamicRendering          = true;
+    info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+
+    info.PipelineInfoMain.PipelineRenderingCreateInfo = (VkPipelineRenderingCreateInfoKHR){
+        .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR,
+        .colorAttachmentCount    = 1,
+        .pColorAttachmentFormats = &swapchain_format,
+        .depthAttachmentFormat   = depth_format,
+    };
+
+    info.PipelineInfoMain.SwapChainImageUsage = swapchain_usage;
+
+    ImGui_ImplVulkan_Init(&info);
+}
+
+
+
 void renderer_create(Renderer* r, RendererDesc* desc)
 {
 
@@ -894,7 +953,7 @@ void renderer_create(Renderer* r, RendererDesc* desc)
         query_device_features(r->physical_device, &r->info.feature_chain);
 
         RendererCaps caps = default_caps();
-        
+
         // Enable debug printf if requested
         if(desc->enable_debug_printf)
         {
@@ -917,8 +976,8 @@ void renderer_create(Renderer* r, RendererDesc* desc)
         {
             r->info.feature_chain.maintenance5.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR;
             r->info.feature_chain.maintenance5.pNext = NULL;
-            tail->pNext = (VkBaseOutStructure*)&r->info.feature_chain.maintenance5;
-            tail = (VkBaseOutStructure*)&r->info.feature_chain.maintenance5;
+            tail->pNext                              = (VkBaseOutStructure*)&r->info.feature_chain.maintenance5;
+            tail                                     = (VkBaseOutStructure*)&r->info.feature_chain.maintenance5;
         }
 
         if(desc->enable_debug_printf && device_has_extension(r->physical_device, VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME))
@@ -926,7 +985,7 @@ void renderer_create(Renderer* r, RendererDesc* desc)
             r->info.feature_chain.shaderNonSemanticInfo.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_NON_SEMANTIC_INFO_FEATURES_KHR;
             r->info.feature_chain.shaderNonSemanticInfo.pNext = NULL;
             tail->pNext = (VkBaseOutStructure*)&r->info.feature_chain.shaderNonSemanticInfo;
-            tail = (VkBaseOutStructure*)&r->info.feature_chain.shaderNonSemanticInfo;
+            tail        = (VkBaseOutStructure*)&r->info.feature_chain.shaderNonSemanticInfo;
         }
 
         tail->pNext = NULL;
@@ -992,7 +1051,7 @@ void renderer_create(Renderer* r, RendererDesc* desc)
         {
             extensions[ext_count++] = VK_KHR_MAINTENANCE_5_EXTENSION_NAME;
         }
-        
+
         if(desc->enable_debug_printf && device_has_extension(r->physical_device, VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME))
         {
             extensions[ext_count++] = VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME;
@@ -1088,7 +1147,7 @@ void renderer_create(Renderer* r, RendererDesc* desc)
                                                {
                                                    .binding         = 0,
                                                    .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-                                                   .descriptorCount = MAX_BINDLESS_TEXTURES,
+                                                   .descriptorCount = desc->bindless_sampled_image_count,
                                                    .stageFlags      = VK_SHADER_STAGE_ALL,
                                                },
 
@@ -1096,7 +1155,7 @@ void renderer_create(Renderer* r, RendererDesc* desc)
                                                {
                                                    .binding         = 1,
                                                    .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLER,
-                                                   .descriptorCount = MAX_BINDLESS_SAMPLERS,
+                                                   .descriptorCount = desc->bindless_sampler_count,
                                                    .stageFlags      = VK_SHADER_STAGE_ALL,
                                                },
 
@@ -1104,7 +1163,7 @@ void renderer_create(Renderer* r, RendererDesc* desc)
                                                {
                                                    .binding         = 2,
                                                    .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                                                   .descriptorCount = MAX_BINDLESS_STORAGE_IMAGES,
+                                                   .descriptorCount = desc->bindless_storage_image_count,
                                                    .stageFlags      = VK_SHADER_STAGE_ALL,
                                                }};
     VkDescriptorBindingFlags     flags[ARRAY_COUNT(bindings)];
@@ -1133,9 +1192,9 @@ void renderer_create(Renderer* r, RendererDesc* desc)
 
 
     VkDescriptorPoolSize sizes[] = {
-        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, MAX_BINDLESS_TEXTURES},
-        {VK_DESCRIPTOR_TYPE_SAMPLER, MAX_BINDLESS_SAMPLERS},
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, MAX_BINDLESS_STORAGE_IMAGES},
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, desc->bindless_sampled_image_count},
+        {VK_DESCRIPTOR_TYPE_SAMPLER, desc->bindless_sampler_count},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, desc->bindless_storage_image_count},
     };
     VkDescriptorPoolCreateInfo cib = {
         .sType   = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -1217,6 +1276,27 @@ void renderer_create(Renderer* r, RendererDesc* desc)
 
     vmaCreateAllocator(&allocatorInfo, &r->vmaallocator);
 
+    VkDescriptorPoolSize pool_sizes[] = {
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1000},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1000},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1000},
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1000},
+    };
+
+    VkDescriptorPoolCreateInfo pool_info = {
+        .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
+        .maxSets       = 1000,
+        .poolSizeCount = 4,
+        .pPoolSizes    = pool_sizes,
+    };
+
+    vkCreateDescriptorPool(r->device, &pool_info, NULL, &r->imgui_pool);
+
+    imgui_init(r->window, r->instance.instance, r->physical_device, r->device, r->graphics_queue_index,
+               r->graphics_queue, r->imgui_pool,r->swapchain.image_count, r->swapchain.image_count,
+               r->swapchain.format, VK_FORMAT_UNDEFINED, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+
 
     VkFormat depth_format = pick_depth_format(r->physical_device);
 }
@@ -1232,13 +1312,13 @@ void renderer_destroy(Renderer* r)
     vkDestroyDevice(r->device, NULL);
 }
 
-bool buffer_pool_init(Renderer* r,
-                      BufferPool* pool,
-                      VkDeviceSize size_bytes,
-                      VkBufferUsageFlags usage,
-                      VmaMemoryUsage memory_usage,
+bool buffer_pool_init(Renderer*                r,
+                      BufferPool*              pool,
+                      VkDeviceSize             size_bytes,
+                      VkBufferUsageFlags       usage,
+                      VmaMemoryUsage           memory_usage,
                       VmaAllocationCreateFlags alloc_flags,
-                      oa_uint32 max_allocs)
+                      oa_uint32                max_allocs)
 {
     if(!r || !pool || size_bytes == 0)
         return false;
@@ -1271,11 +1351,11 @@ bool buffer_pool_init(Renderer* r,
         return false;
     }
 
-    pool->size_bytes  = size_bytes;
-    pool->usage       = usage;
+    pool->size_bytes   = size_bytes;
+    pool->usage        = usage;
     pool->memory_usage = memory_usage;
-    pool->alloc_flags = alloc_flags;
-    pool->mapped      = out_info.pMappedData;
+    pool->alloc_flags  = alloc_flags;
+    pool->mapped       = out_info.pMappedData;
 
     oa_init(&pool->allocator, (oa_uint32)size_bytes, max_allocs);
 
@@ -1308,9 +1388,9 @@ BufferSlice buffer_pool_alloc(BufferPool* pool, VkDeviceSize size_bytes, VkDevic
     if(size_bytes > UINT32_MAX || alignment > UINT32_MAX)
         return slice;
 
-    OA_Allocation allocation = (alignment > 1)
-                                  ? oa_allocate_aligned(&pool->allocator, (oa_uint32)size_bytes, (oa_uint32)alignment)
-                                  : oa_allocate(&pool->allocator, (oa_uint32)size_bytes);
+    OA_Allocation allocation = (alignment > 1) ?
+                                   oa_allocate_aligned(&pool->allocator, (oa_uint32)size_bytes, (oa_uint32)alignment) :
+                                   oa_allocate(&pool->allocator, (oa_uint32)size_bytes);
 
     if(allocation.offset == OA_NO_SPACE)
         return slice;

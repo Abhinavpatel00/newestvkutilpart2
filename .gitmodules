@@ -1,0 +1,6 @@
+[submodule "external/simde"]
+	path = external/simde
+	url = https://github.com/simd-everywhere/simde
+[submodule "external/libalgebra"]
+	path = external/libalgebra
+	url = https://github.com/mklarqvist/libalgebra.git
