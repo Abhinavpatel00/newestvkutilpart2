@@ -280,61 +280,54 @@ int main()
 
         {
             vkCmdBeginRendering(cmd, &rendering);
-
-            imgui_begin_frame();
-
-            igBegin("Control", NULL, 0);
-
-            if(igButton("+1", (ImVec2){60, 0}))
             {
-                if(n < max_triangles)
-                    n++;
+                imgui_begin_frame();
+                igBegin("Control", NULL, 0);
+                if(igButton("+1", (ImVec2){60, 0}))
+                {
+                    if(n < max_triangles)
+                        n++;
+                }
+                igSameLine(0, 10);
+                if(igButton("-1", (ImVec2){60, 0}))
+                {
+                    if(n > 1)
+                        n--;
+                }
+                igText("Triangles: %u", n);
+                igEnd();
+                igRender();
+
+                static uint32_t prev_n = 0;
+
+                if(n != prev_n)
+                {
+                    rebuild_geometry(cpu_vertices, cpu_indirect, n);
+
+                    vmaFlushAllocation(renderer.vmaallocator, pool.allocation, vertex_slice.offset, sizeof(Vertex) * n * 3);
+
+                    vmaFlushAllocation(renderer.vmaallocator, pool.allocation, indirect_slice.offset, sizeof(VkDrawIndirectCommand));
+
+                    prev_n = n;
+                }
             }
-
-            igSameLine(0, 10);
-
-            if(igButton("-1", (ImVec2){60, 0}))
-            {
-                if(n > 1)
-                    n--;
-            }
-
-            igText("Triangles: %u", n);
-
-            igEnd();
-
-
-            igRender();
-            static uint32_t prev_n = 0;
-
-            if(n != prev_n)
-            {
-                rebuild_geometry(cpu_vertices, cpu_indirect, n);
-
-                vmaFlushAllocation(renderer.vmaallocator, pool.allocation, vertex_slice.offset, sizeof(Vertex) * n * 3);
-
-                vmaFlushAllocation(renderer.vmaallocator, pool.allocation, indirect_slice.offset, sizeof(VkDrawIndirectCommand));
-
-                prev_n = n;
-            }
-
-
             ImDrawData* draw_data = igGetDrawData();
+            {
 
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, render_pipelines.pipelines[TRIANGLE_PIPELINE]);
+                vk_cmd_set_viewport_scissor(cmd, renderer.swapchain.extent);
+                //        Push push = {gpu_address, (float)renderer.swapchain.extent.width / (float)renderer.swapchain.extent.height, {0}};
 
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, render_pipelines.pipelines[TRIANGLE_PIPELINE]);
-            vk_cmd_set_viewport_scissor(cmd, renderer.swapchain.extent);
-            //        Push push = {gpu_address, (float)renderer.swapchain.extent.width / (float)renderer.swapchain.extent.height, {0}};
-
-            Push push       = {0};
-            push.vertex_ptr = gpu_address;
-            push.aspect     = (float)renderer.swapchain.extent.width / (float)renderer.swapchain.extent.height;
-            vkCmdPushConstants(cmd, renderer.bindless_system.pipeline_layout, VK_SHADER_STAGE_ALL, 0, sizeof(Push), &push);
-            vkCmdDrawIndirectCount(cmd, indirect_slice.buffer, indirect_slice.offset, count_slice.buffer,
-                                   count_slice.offset, draw_count, sizeof(VkDrawIndirectCommand));
-
-
-            ImGui_ImplVulkan_RenderDrawData(draw_data, cmd, VK_NULL_HANDLE);
+                Push push       = {0};
+                push.vertex_ptr = gpu_address;
+                push.aspect     = (float)renderer.swapchain.extent.width / (float)renderer.swapchain.extent.height;
+                vkCmdPushConstants(cmd, renderer.bindless_system.pipeline_layout, VK_SHADER_STAGE_ALL, 0, sizeof(Push), &push);
+                vkCmdDrawIndirectCount(cmd, indirect_slice.buffer, indirect_slice.offset, count_slice.buffer,
+                                       count_slice.offset, draw_count, sizeof(VkDrawIndirectCommand));
+            }
+            {
+                ImGui_ImplVulkan_RenderDrawData(draw_data, cmd, VK_NULL_HANDLE);
+            }
             vkCmdEndRendering(cmd);
         }
 
