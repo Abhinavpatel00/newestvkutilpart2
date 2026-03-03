@@ -768,7 +768,6 @@ void imgui_init(GLFWwindow*       window,
 }
 
 
-
 void renderer_create(Renderer* r, RendererDesc* desc)
 {
 
@@ -1294,11 +1293,28 @@ void renderer_create(Renderer* r, RendererDesc* desc)
     vkCreateDescriptorPool(r->device, &pool_info, NULL, &r->imgui_pool);
 
     imgui_init(r->window, r->instance.instance, r->physical_device, r->device, r->graphics_queue_index,
-               r->graphics_queue, r->imgui_pool,r->swapchain.image_count, r->swapchain.image_count,
+               r->graphics_queue, r->imgui_pool, r->swapchain.image_count, r->swapchain.image_count,
                r->swapchain.format, VK_FORMAT_UNDEFINED, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
 
 
+
+    flow_id_pool_init(&r->texture_pool, MAX_BINDLESS_TEXTURES);
+
+
+
+
+
+
+
+
+
+
+
+
+
     VkFormat depth_format = pick_depth_format(r->physical_device);
+
+
 }
 
 void renderer_destroy(Renderer* r)

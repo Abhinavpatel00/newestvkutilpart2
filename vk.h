@@ -23,7 +23,7 @@
 #include "offset_allocator.h"
 #include <stdint.h>
 #include "cachestuff.h"
-
+#include "flow/flow.h"
 // Fallback for older Vulkan headers without VK_KHR_shader_non_semantic_info
 #ifndef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_NON_SEMANTIC_INFO_FEATURES_KHR
 #define VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_NON_SEMANTIC_INFO_FEATURES_KHR 1000333000
@@ -367,6 +367,8 @@ typedef struct
     VkDescriptorPool imgui_pool;
     RenderTarget     hdr_color;
     RenderTarget     depth;
+
+    flow_id_pool texture_pool;
     //  RenderTarget depth[MAX_SWAPCHAIN_IMAGES];
 } Renderer;
 

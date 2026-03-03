@@ -640,3 +640,19 @@ int         main()
     //renderer_destroy(&renderer);
     return 0;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+// Q: Are ya shipping, son?
+// A: I'm building the pipeline that builds the pipeline.
+
