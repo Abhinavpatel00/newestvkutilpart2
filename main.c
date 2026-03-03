@@ -8,6 +8,10 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <vulkan/vulkan_core.h>
+
+#define KB(x) ((x) * 1024ULL)
+#define MB(x) ((x) * 1024ULL * 1024ULL)
+#define GB(x) ((x) * 1024ULL * 1024ULL * 1024ULL)
 #define PAD(name, size) uint8_t name[(size)]
 #define PUSH_CONSTANT(name, BODY)                                                                                      \
     typedef struct ALIGNAS(16) name_init                                                                               \
@@ -99,8 +103,28 @@ TriList generate(uint32_t start, uint32_t end)
 
     return result;
 }
-
-
+// whatare these GPU uniform block
+// Cluster grid
+// Culling results buffer
+// light buffer
+// camera state and input state in renderer may be and upload to uniform
+//   Light culling buffers
+//Scene lifetime state:
+// • Scene graph
+// • BVH
+// • Static meshes
+// • GPUBufferArena
+//• LightSystem
+//
+//    Frame lifetime state:
+// • Camera matrices
+// • Frustum
+// • Visible object list
+// • Command buffers
+// Renderer lifetime state:
+// • GPU infrastructure
+// • Resource caches and pools
+// • Frame contexts
 typedef enum PipelineID
 {
     TRIANGLE_PIPELINE,
@@ -123,7 +147,7 @@ typedef struct
     float far_z;
 } Camera;
 
-static void camera_build_proj_reverse_z_infinite(mat4 out_proj, Camera* cam, float aspect)
+static FORCE_INLINE void camera_build_proj_reverse_z_infinite(mat4 out_proj, Camera* cam, float aspect)
 {
     float f = 1.0f / tanf(cam->fov_y * 0.5f);
     float n = cam->near_z;
@@ -209,7 +233,7 @@ int         main()
         render_pipelines.pipelines[TRIANGLE_PIPELINE] = create_graphics_pipeline(&renderer, &cfg);
     }
     BufferPool pool = {0};
-    buffer_pool_init(&renderer, &pool, 16 * 1024 * 1024,
+    buffer_pool_init(&renderer, &pool, MB(16),
                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
                      VMA_MEMORY_USAGE_AUTO,
                      VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT, 2048);
@@ -269,12 +293,17 @@ int         main()
 
         static bool mouse_captured = false;
 
+        static double lastX = 0.0, lastY = 0.0;
         if(glfwGetMouseButton(renderer.window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS)
         {
             if(!mouse_captured)
             {
                 glfwSetInputMode(renderer.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
                 mouse_captured = true;
+                double x, y;
+                glfwGetCursorPos(renderer.window, &x, &y);
+                lastX = x;
+                lastY = y;
             }
         }
         else
@@ -291,8 +320,7 @@ int         main()
 
             if(mouse_captured)
             {
-                static double lastX = 0.0, lastY = 0.0;
-                static bool   firstMouse = true;
+                static bool firstMouse = true;
 
                 double xpos, ypos;
                 glfwGetCursorPos(renderer.window, &xpos, &ypos);
@@ -491,10 +519,7 @@ int         main()
             if(n != prev_n)
             {
                 // write code here we use immediate mode for experimentation
-
-
-                TriList all = generate(0, n - 1);
-
+                TriList  all        = generate(0, n - 1);
                 uint32_t tri_per    = n - 2;
                 uint32_t total_tris = all.count * tri_per;
 
@@ -548,11 +573,8 @@ int         main()
             }
             ImDrawData* draw_data = igGetDrawData();
             {
-
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, render_pipelines.pipelines[TRIANGLE_PIPELINE]);
                 vk_cmd_set_viewport_scissor(cmd, renderer.swapchain.extent);
-                //        Push push = {gpu_address, (float)renderer.swapchain.extent.width / (float)renderer.swapchain.extent.height, {0}};
-
                 Push push       = {0};
                 push.vertex_ptr = gpu_address;
                 push.aspect     = (float)renderer.swapchain.extent.width / (float)renderer.swapchain.extent.height;
