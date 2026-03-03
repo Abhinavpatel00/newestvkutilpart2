@@ -19,8 +19,6 @@
 #include "external/cimgui/cimgui_impl.h"
 
 
-
-
 #include "helpers.h"
 #include "offset_allocator.h"
 #include <stdint.h>
@@ -301,7 +299,6 @@ typedef struct RenderTarget
 } RenderTarget;
 
 
-
 typedef struct RenderTargetPool
 {
     RenderTarget targets[RT_POOL_MAX];
@@ -309,6 +306,24 @@ typedef struct RenderTargetPool
     uint32_t     unused_frames[RT_POOL_MAX];
     uint32_t     count;
 } RenderTargetPool;
+typedef enum FrustumPlane
+{
+    TopPlane,
+    BottomPlane,
+    LeftPlane,
+    RightPlane,
+    NearPlane,
+    FarPlane,
+    FrustumPlaneCount
+} FrustumPlane;
+
+typedef struct Frustum
+{
+    //  ax + by + cz + d = 0
+    //  vec =(a,b,c,d)
+    vec4 planes[FrustumPlaneCount];
+} Frustum;
+
 
 #define MAX_FRAMES_IN_FLIGHT 3
 typedef struct
@@ -347,11 +362,11 @@ typedef struct
 
     DeviceInfo info;
 
-    VkPipelineCache pipeline_cache;
-
+    VkPipelineCache  pipeline_cache;
+    Frustum          frustum;
     VkDescriptorPool imgui_pool;
-    RenderTarget hdr_color;
-    RenderTarget depth;
+    RenderTarget     hdr_color;
+    RenderTarget     depth;
     //  RenderTarget depth[MAX_SWAPCHAIN_IMAGES];
 } Renderer;
 
@@ -520,7 +535,7 @@ static inline GraphicsPipelineConfig pipeline_config_default(void)
 
     cfg.depth_test_enable  = true;
     cfg.depth_write_enable = true;
-    cfg.depth_compare_op   = VK_COMPARE_OP_LESS_OR_EQUAL;
+    cfg.depth_compare_op   = VK_COMPARE_OP_GREATER;
 
     cfg.color_attachment_count = 0;
     cfg.color_formats          = NULL;

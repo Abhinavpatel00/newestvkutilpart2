@@ -1,3 +1,5 @@
+#include "external/cglm/include/cglm/cglm.h"
+#include "external/cglm/include/cglm/types.h"
 #include "tinytypes.h"
 #include "vk_default.h"
 #include "vk.h"
@@ -6,7 +8,23 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <vulkan/vulkan_core.h>
-
+#define PAD(name, size) uint8_t name[(size)]
+#define PUSH_CONSTANT(name, BODY)                                                                                      \
+    typedef struct ALIGNAS(16) name_init                                                                               \
+    {                                                                                                                  \
+        BODY                                                                                                           \
+    } name_init;                                                                                                       \
+    enum                                                                                                               \
+    {                                                                                                                  \
+        name##_pad_size = 256 - sizeof(name_init)                                                                      \
+    };                                                                                                                 \
+                                                                                                                       \
+    typedef struct ALIGNAS(16) name                                                                                    \
+    {                                                                                                                  \
+        BODY uint8_t _pad[name##_pad_size];                                                                            \
+    } name;                                                                                                            \
+                                                                                                                       \
+    _Static_assert(sizeof(name) == 256, "Push constant != 256");
 typedef struct Buffer
 {
     VkBuffer        buffer;  // vulkan buffer
@@ -16,12 +34,71 @@ typedef struct Buffer
     VmaAllocation   allocation;  // Memory associated with the buffer
 } Buffer;
 
-
 typedef struct
 {
     float pos[2];
     float color[3];
 } Vertex;
+typedef struct
+{
+    uint32_t i, j, k;
+} Tri;
+
+typedef struct
+{
+    Tri*     tris;
+    uint32_t count;
+} Triangulation;
+
+typedef struct
+{
+    Triangulation* data;
+    uint32_t       count;
+} TriList;
+
+TriList generate(uint32_t start, uint32_t end)
+{
+    TriList result = {0};
+
+    if(end - start < 2)
+    {
+        result.data          = malloc(sizeof(Triangulation));
+        result.data[0].tris  = NULL;
+        result.data[0].count = 0;
+        result.count         = 1;
+        return result;
+    }
+
+    for(uint32_t k = start + 1; k < end; k++)
+    {
+        TriList left  = generate(start, k);
+        TriList right = generate(k, end);
+
+        for(uint32_t i = 0; i < left.count; i++)
+        {
+            for(uint32_t j = 0; j < right.count; j++)
+            {
+
+                uint32_t total = left.data[i].count + right.data[j].count + 1;
+
+                Triangulation t = {0};
+                t.tris          = malloc(sizeof(Tri) * total);
+
+                memcpy(t.tris, left.data[i].tris, left.data[i].count * sizeof(Tri));
+
+                memcpy(t.tris + left.data[i].count, right.data[j].tris, right.data[j].count * sizeof(Tri));
+
+                t.tris[total - 1] = (Tri){start, k, end};
+                t.count           = total;
+
+                result.data                 = realloc(result.data, sizeof(Triangulation) * (result.count + 1));
+                result.data[result.count++] = t;
+            }
+        }
+    }
+
+    return result;
+}
 
 
 typedef enum PipelineID
@@ -34,29 +111,39 @@ typedef struct RenderPipelines
     VkPipeline pipelines[PIPELINE_COUNT];
 } RendererPipelines;
 
+typedef struct
+{
+    vec3  position;
+    float yaw;    // radians
+    float pitch;  // radians
+    float move_speed;
+    float look_speed;
+    float fov_y;
+    float near_z;
+    float far_z;
+} Camera;
+
+static void camera_build_proj_reverse_z_infinite(mat4 out_proj, Camera* cam, float aspect)
+{
+    float f = 1.0f / tanf(cam->fov_y * 0.5f);
+    float n = cam->near_z;
+
+    glm_mat4_zero(out_proj);
+
+    out_proj[0][0] = f / aspect;
+    out_proj[1][1] = f;
+
+    // Reverse-Z, infinite far
+    out_proj[2][2] = 0.0f;
+    out_proj[2][3] = -1.0f;
+
+    out_proj[3][2] = n;
+    out_proj[3][3] = 0.0f;
+}
+
 #define VALIDATION true
 static bool g_framebuffer_resized = false;
-void        rebuild_geometry(Vertex* cpu_vertices, VkDrawIndirectCommand* cpu_indirect, uint32_t n)
-{
-    uint32_t poly_vertices = n + 2;
-    float    radius        = 0.8f;
-
-    uint32_t index = 0;
-
-    for(uint32_t i = 1; i < poly_vertices - 1; ++i)
-    {
-        float a0 = 0;
-        float a1 = (2.0f * M_PI * i) / poly_vertices;
-        float a2 = (2.0f * M_PI * (i + 1)) / poly_vertices;
-
-        cpu_vertices[index++] = (Vertex){{cosf(a0) * radius, sinf(a0) * radius}, {1, 0, 0}};
-        cpu_vertices[index++] = (Vertex){{cosf(a1) * radius, sinf(a1) * radius}, {0, 1, 0}};
-        cpu_vertices[index++] = (Vertex){{cosf(a2) * radius, sinf(a2) * radius}, {0, 0, 1}};
-    }
-
-    cpu_indirect[0].vertexCount = n * 3;
-}
-int main()
+int         main()
 {
     VK_CHECK(volkInitialize());
     if(!is_instance_extension_supported("VK_KHR_wayland_surface"))
@@ -118,8 +205,6 @@ int main()
         cfg.color_attachment_count                    = 1;
         cfg.color_formats                             = &renderer.swapchain.format;
         cfg.use_vertex_input                          = false;
-        cfg.depth_test_enable                         = false;
-        cfg.depth_write_enable                        = false;
         cfg.polygon_mode                              = VK_POLYGON_MODE_LINE;
         render_pipelines.pipelines[TRIANGLE_PIPELINE] = create_graphics_pipeline(&renderer, &cfg);
     }
@@ -128,34 +213,10 @@ int main()
                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
                      VMA_MEMORY_USAGE_AUTO,
                      VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT, 2048);
-    //
-    // const uint32_t grid_x     = 128;
-    // const uint32_t grid_y     = 72;
-    // const uint32_t tri_count  = grid_x * grid_y;
-    // const uint32_t vert_count = tri_count * 3;
-    // const uint32_t draw_count = 1;
-    //
-    //
-    // uint32_t index  = 0;
-    // float    cell_w = 2.0f / (float)grid_x;
-    // float    cell_h = 2.0f / (float)grid_y;
-    // float    tri_w  = cell_w * 0.9f;
-    // float    tri_h  = cell_h * 0.9f;
-    // for(uint32_t y = 0; y < grid_y; y++)
-    //     for(uint32_t x = 0; x < grid_x; x++)
-    //     {
-    //         float base_x = -1.0f + (float)x * cell_w;
-    //         float base_y = -1.0f + (float)y * cell_h;
-    //
-    //         cpu_vertices[index++] = (Vertex){{base_x, base_y}, {1, 0, 0}};
-    //         cpu_vertices[index++] = (Vertex){{base_x + tri_w, base_y}, {0, 1, 0}};
-    //         cpu_vertices[index++] = (Vertex){{base_x, base_y + tri_h}, {0, 0, 1}};
-    //     }
-    //
-    //
 
 
-    uint32_t       n             = 4222;
+    uint32_t n = 4;
+
     uint32_t       max_triangles = 62202;  // allocate once for worst case
     const uint32_t poly_vertices = n + 2;
 
@@ -170,63 +231,201 @@ int main()
     VkDrawIndirectCommand* cpu_indirect = (VkDrawIndirectCommand*)indirect_slice.mapped;
     uint32_t*              cpu_count    = (uint32_t*)count_slice.mapped;
 
-    typedef struct
-    {
-        float x, y;
-    } Vec2;
 
-    Vec2* poly = malloc(sizeof(Vec2) * poly_vertices);
+    vmaFlushAllocation(renderer.vmaallocator, pool.allocation, vertex_slice.offset, sizeof(Vertex) * n * 3);
 
-    float radius = 0.8f;
-
-    for(uint32_t i = 0; i < poly_vertices; ++i)
-    {
-        float angle = (2.0f * M_PI * i) / (float)poly_vertices;
-        poly[i].x   = cosf(angle) * radius;
-        poly[i].y   = sinf(angle) * radius;
-    }
-    uint32_t index = 0;
-
-    for(uint32_t i = 1; i < poly_vertices - 1; ++i)
-    {
-        // triangle = (0, i, i+1)
-
-        cpu_vertices[index++] = (Vertex){{poly[0].x, poly[0].y}, {1, 0, 0}};
-        cpu_vertices[index++] = (Vertex){{poly[i].x, poly[i].y}, {0, 1, 0}};
-        cpu_vertices[index++] = (Vertex){{poly[i + 1].x, poly[i + 1].y}, {0, 0, 1}};
-    }
-
-
-    cpu_indirect[0] = (VkDrawIndirectCommand){
-        .vertexCount   = n * 3,
-        .instanceCount = 1,
-        .firstVertex   = 0,
-        .firstInstance = 0,
-    };
-    *cpu_count = draw_count;
-
-    vmaFlushAllocation(renderer.vmaallocator, pool.allocation, vertex_slice.offset, vertex_slice.size);
-    vmaFlushAllocation(renderer.vmaallocator, pool.allocation, indirect_slice.offset, indirect_slice.size);
-    vmaFlushAllocation(renderer.vmaallocator, pool.allocation, count_slice.offset, count_slice.size);
 
     VkBufferDeviceAddressInfo addrInfo = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = pool.buffer};
     VkDeviceAddress           gpu_address = vkGetBufferDeviceAddress(renderer.device, &addrInfo) + vertex_slice.offset;
 
+    PUSH_CONSTANT(Push, VkDeviceAddress vertex_ptr; float aspect; mat4 view_proj;);
+    Camera cam = {
+        .position   = {0.0f, 0.0f, 3.0f},
+        .yaw        = 0.0f,
+        .pitch      = 0.0f,
+        .move_speed = 3.0f,
+        .look_speed = 0.0025f,
+        .fov_y      = glm_rad(75.0f),
+        .near_z     = 0.05f,
+        .far_z      = 2000.0f,
+    };
 
-    typedef struct
-    {
-        VkDeviceAddress vertex_ptr;
-        float           aspect;
-        uint8_t         padding[256 - sizeof(VkDeviceAddress) - sizeof(float)];
-    } Push;
+    glfwSetInputMode(renderer.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+    double last_time        = glfwGetTime();
+    mat4   camera_view_proj = GLM_MAT4_IDENTITY_INIT;
+
     while(!glfwWindowShouldClose(renderer.window))
     {
         glfwPollEvents();
+
+        double now = glfwGetTime();
+        float  dt  = (float)(now - last_time);
+        last_time  = now;
+
         int fb_w, fb_h;
         glfwGetFramebufferSize(renderer.window, &fb_w, &fb_h);
         renderer.swapchain.needs_recreate |= g_framebuffer_resized || fb_w != (int)renderer.swapchain.extent.width
                                              || fb_h != (int)renderer.swapchain.extent.height;
 
+        static bool mouse_captured = false;
+
+        if(glfwGetMouseButton(renderer.window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS)
+        {
+            if(!mouse_captured)
+            {
+                glfwSetInputMode(renderer.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+                mouse_captured = true;
+            }
+        }
+        else
+        {
+            if(mouse_captured)
+            {
+                glfwSetInputMode(renderer.window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+                mouse_captured = false;
+            }
+        }
+
+
+        {  // camera
+
+            if(mouse_captured)
+            {
+                static double lastX = 0.0, lastY = 0.0;
+                static bool   firstMouse = true;
+
+                double xpos, ypos;
+                glfwGetCursorPos(renderer.window, &xpos, &ypos);
+
+                if(firstMouse)
+                {
+                    lastX      = xpos;
+                    lastY      = ypos;
+                    firstMouse = false;
+                }
+
+                float dx = (float)(xpos - lastX);
+                float dy = (float)(ypos - lastY);
+
+                lastX = xpos;
+                lastY = ypos;
+
+                cam.yaw += dx * cam.look_speed;
+                cam.pitch -= dy * cam.look_speed;  // invert Y properly
+
+                float limit = glm_rad(89.0f);
+                cam.pitch   = glm_clamp(cam.pitch, -limit, limit);
+                if(cam.pitch > limit)
+                    cam.pitch = limit;
+                if(cam.pitch < -limit)
+                    cam.pitch = -limit;
+            }
+
+
+            vec3 forward = {
+                cosf(cam.pitch) * sinf(cam.yaw),
+                sinf(cam.pitch),
+                -cosf(cam.pitch) * cosf(cam.yaw),
+            };
+            glm_vec3_normalize(forward);
+
+            vec3 world_up = {0.0f, 1.0f, 0.0f};
+            vec3 right    = {0};
+            vec3 up       = {0};
+            glm_vec3_cross(forward, world_up, right);
+            glm_vec3_normalize(right);
+            glm_vec3_cross(right, forward, up);
+
+            float speed = cam.move_speed;
+            if(glfwGetKey(renderer.window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
+                speed *= 3.0f;
+
+            vec3 delta = {0};
+            if(glfwGetKey(renderer.window, GLFW_KEY_W) == GLFW_PRESS)
+                glm_vec3_muladds(forward, speed * dt, delta);
+            if(glfwGetKey(renderer.window, GLFW_KEY_S) == GLFW_PRESS)
+                glm_vec3_muladds(forward, -speed * dt, delta);
+            if(glfwGetKey(renderer.window, GLFW_KEY_D) == GLFW_PRESS)
+                glm_vec3_muladds(right, speed * dt, delta);
+            if(glfwGetKey(renderer.window, GLFW_KEY_A) == GLFW_PRESS)
+                glm_vec3_muladds(right, -speed * dt, delta);
+            if(glfwGetKey(renderer.window, GLFW_KEY_E) == GLFW_PRESS)
+                glm_vec3_muladds(world_up, speed * dt, delta);
+            if(glfwGetKey(renderer.window, GLFW_KEY_Q) == GLFW_PRESS)
+                glm_vec3_muladds(world_up, -speed * dt, delta);
+
+            glm_vec3_add(cam.position, delta, cam.position);
+
+            vec3 center = {0};
+            glm_vec3_add(cam.position, forward, center);
+
+            mat4 view      = GLM_MAT4_IDENTITY_INIT;
+            mat4 proj      = GLM_MAT4_IDENTITY_INIT;
+            mat4 view_proj = GLM_MAT4_IDENTITY_INIT;
+
+            glm_lookat(cam.position, center, up, view);
+
+
+            float aspect = (float)renderer.swapchain.extent.width / (float)renderer.swapchain.extent.height;
+
+            camera_build_proj_reverse_z_infinite(proj, &cam, aspect);
+            proj[1][1] *= -1.0f;  // Vulkan Y flip
+            glm_mat4_mul(proj, view, view_proj);
+            glm_mat4_copy(view_proj, camera_view_proj);
+        }
+
+        {
+            // frustum
+            mat4 m;
+
+            glm_mat4_copy(camera_view_proj, m);
+
+            renderer.frustum.planes[LeftPlane][0] = m[0][3] + m[0][0];
+            renderer.frustum.planes[LeftPlane][1] = m[1][3] + m[1][0];
+            renderer.frustum.planes[LeftPlane][2] = m[2][3] + m[2][0];
+            renderer.frustum.planes[LeftPlane][3] = m[3][3] + m[3][0];
+
+            //RIGHT  : row3 - row0
+            renderer.frustum.planes[RightPlane][0] = m[0][3] - m[0][0];
+            renderer.frustum.planes[RightPlane][1] = m[1][3] - m[1][0];
+            renderer.frustum.planes[RightPlane][2] = m[2][3] - m[2][0];
+            renderer.frustum.planes[RightPlane][3] = m[3][3] - m[3][0];
+
+            // row3 + row1
+            renderer.frustum.planes[BottomPlane][0] = m[0][3] + m[0][1];
+            renderer.frustum.planes[BottomPlane][1] = m[1][3] + m[1][1];
+            renderer.frustum.planes[BottomPlane][2] = m[2][3] + m[2][1];
+            renderer.frustum.planes[BottomPlane][3] = m[3][3] + m[3][1];
+
+            //TOP   row3 - row1
+            renderer.frustum.planes[TopPlane][0] = m[0][3] - m[0][1];
+            renderer.frustum.planes[TopPlane][1] = m[1][3] - m[1][1];
+            renderer.frustum.planes[TopPlane][2] = m[2][3] - m[2][1];
+            renderer.frustum.planes[TopPlane][3] = m[3][3] - m[3][1];
+
+            //   : row3 + row2   (Vulkan style)
+            renderer.frustum.planes[NearPlane][0] = m[0][3] + m[0][2];
+            renderer.frustum.planes[NearPlane][1] = m[1][3] + m[1][2];
+            renderer.frustum.planes[NearPlane][2] = m[2][3] + m[2][2];
+            renderer.frustum.planes[NearPlane][3] = m[3][3] + m[3][2];
+
+            //     FAR    : row3 - row2
+            renderer.frustum.planes[FarPlane][0] = m[0][3] - m[0][2];
+            renderer.frustum.planes[FarPlane][1] = m[1][3] - m[1][2];
+            renderer.frustum.planes[FarPlane][2] = m[2][3] - m[2][2];
+            renderer.frustum.planes[FarPlane][3] = m[3][3] - m[3][2];
+
+            forEach(i, FrustumPlaneCount)
+            {
+                vec4* p       = &renderer.frustum.planes[i];
+                float len     = sqrtf((*p)[0] * (*p)[0] + (*p)[1] * (*p)[1] + (*p)[2] * (*p)[2]);
+                float inv_len = 1.0f / len;
+                (*p)[0] *= inv_len;
+                (*p)[1] *= inv_len;
+                (*p)[2] *= inv_len;
+                (*p)[3] *= inv_len;
+            }
+        }
         // Window minimized → suspend rendering
         if(fb_w == 0 || fb_h == 0)
         {
@@ -280,36 +479,72 @@ int main()
 
         {
             vkCmdBeginRendering(cmd, &rendering);
+            imgui_begin_frame();
+            igBegin("Triangulation Control", NULL, 0);
+
+            igSliderInt("n", (int*)&n, 3, 12, "%d", 0);
+            igText("Catalan(n-2) grows brutally fast.");
+            igEnd();
+            igRender();
+            static uint32_t prev_n = 0;
+
+            if(n != prev_n)
             {
-                imgui_begin_frame();
-                igBegin("Control", NULL, 0);
-                if(igButton("+1", (ImVec2){60, 0}))
+                // write code here we use immediate mode for experimentation
+
+
+                TriList all = generate(0, n - 1);
+
+                uint32_t tri_per    = n - 2;
+                uint32_t total_tris = all.count * tri_per;
+
+                uint32_t v = 0;
+
+                uint32_t cols = (uint32_t)ceilf(sqrtf((float)all.count));
+                uint32_t rows = (all.count + cols - 1) / cols;
+
+                float cell_w = 2.0f / (float)cols;
+                float cell_h = 2.0f / (float)rows;
+                float radius = fminf(cell_w, cell_h) * 0.35f;
+
+                for(uint32_t t = 0; t < all.count; t++)
                 {
-                    if(n < max_triangles)
-                        n++;
+                    uint32_t row = t / cols;
+                    uint32_t col = t % cols;
+
+                    float center_x = -1.0f + ((float)col + 0.5f) * cell_w;
+                    float center_y = 1.0f - ((float)row + 0.5f) * cell_h;
+                    for(uint32_t k = 0; k < all.data[t].count; k++)
+                    {
+                        Tri tri = all.data[t].tris[k];
+
+                        uint32_t idx[3] = {tri.i, tri.j, tri.k};
+
+                        for(int m = 0; m < 3; m++)
+                        {
+                            float angle              = 2.0f * 3.1415926f * idx[m] / n;
+                            cpu_vertices[v].pos[0]   = center_x + cosf(angle) * radius;
+                            cpu_vertices[v].pos[1]   = center_y + sinf(angle) * radius;
+                            float hue                = (float)t / (float)all.count;
+                            cpu_vertices[v].color[0] = hue;
+                            cpu_vertices[v].color[1] = 0.2f;
+                            cpu_vertices[v].color[2] = 1.0f - hue;
+
+                            v++;
+                        }
+                    }
                 }
-                igSameLine(0, 10);
-                if(igButton("-1", (ImVec2){60, 0}))
-                {
-                    if(n > 1)
-                        n--;
-                }
-                igText("Triangles: %u", n);
-                igEnd();
-                igRender();
 
-                static uint32_t prev_n = 0;
+                cpu_indirect[0].vertexCount   = v;
+                cpu_indirect[0].instanceCount = 1;
+                cpu_indirect[0].firstVertex   = 0;
+                cpu_indirect[0].firstInstance = 0;
 
-                if(n != prev_n)
-                {
-                    rebuild_geometry(cpu_vertices, cpu_indirect, n);
+                *cpu_count = 1;
 
-                    vmaFlushAllocation(renderer.vmaallocator, pool.allocation, vertex_slice.offset, sizeof(Vertex) * n * 3);
+                vmaFlushAllocation(renderer.vmaallocator, pool.allocation, vertex_slice.offset, sizeof(Vertex) * v);
 
-                    vmaFlushAllocation(renderer.vmaallocator, pool.allocation, indirect_slice.offset, sizeof(VkDrawIndirectCommand));
-
-                    prev_n = n;
-                }
+                prev_n = n;
             }
             ImDrawData* draw_data = igGetDrawData();
             {
@@ -321,6 +556,7 @@ int main()
                 Push push       = {0};
                 push.vertex_ptr = gpu_address;
                 push.aspect     = (float)renderer.swapchain.extent.width / (float)renderer.swapchain.extent.height;
+                glm_mat4_copy(camera_view_proj, push.view_proj);
                 vkCmdPushConstants(cmd, renderer.bindless_system.pipeline_layout, VK_SHADER_STAGE_ALL, 0, sizeof(Push), &push);
                 vkCmdDrawIndirectCount(cmd, indirect_slice.buffer, indirect_slice.offset, count_slice.buffer,
                                        count_slice.offset, draw_count, sizeof(VkDrawIndirectCommand));
@@ -374,7 +610,10 @@ int main()
         renderer.current_frame = (renderer.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 
+    printf("%zu", sizeof(Push));
     printf("%zu", sizeof(BufferSlice));
+    printf("Alignment: %zu\n", _Alignof(Push));
+
     //    ANALYZE_STRUCT(ImageState);
     //renderer_destroy(&renderer);
     return 0;

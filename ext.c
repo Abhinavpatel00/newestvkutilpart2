@@ -25,3 +25,6 @@
 #include "pcg.h"
 
 #include "external/meshoptimizer/src/meshoptimizer.h"
+
+   #define FLOW_IMPLEMENTATION
+#include "flow/flow.h"

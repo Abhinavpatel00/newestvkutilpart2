@@ -19,6 +19,7 @@ struct PushConstants
 {
   Vertex* vertexBuffer;
   float   aspect;
+  float4x4 viewProj;
 };
 
 [[vk::push_constant]]
@@ -31,10 +32,8 @@ VSOutput vs_main(uint vertexID: SV_VertexID, uint instanceID: SV_InstanceID)
 
   uint   globalVertexID = instanceID * 3 + vertexID;
   Vertex v              = push.vertexBuffer[globalVertexID];
-  float2 pos = v.pos;
-  pos.x /= push.aspect;  // compensate for wide screens
 
-  o.position = float4(pos, 0, 1);
+  o.position = mul(push.viewProj, float4(v.pos, 0, 1));
   o.color    = v.color;
 
 #if defined(DEBUG_PRINTF) && DEBUG_PRINTF
