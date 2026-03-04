@@ -1,26 +1,34 @@
-// Silence DEBUG_PRINTF warnings when not defined by the build.
 #ifndef DEBUG_PRINTF
 #define DEBUG_PRINTF 0
 #endif
 
 struct Vertex
 {
-  float2 pos;
-  float3 color;
+  float3 pos;
+  float2 uv;
 };
 
 struct VSOutput
 {
   float4 position : SV_Position;
-  float3 color : COLOR0;
+  float2 uv : TEXCOORD0;
 };
 
 struct PushConstants
 {
-  Vertex* vertexBuffer;
-  float   aspect;
-  float4x4 viewProj;
+    Vertex* vertex_ptr;
+    float aspect;
+    float4x4 viewProj;
+
+    uint texture_id;
+    uint sampler_id;
 };
+
+[[vk::binding(0,0)]]
+Texture2D textures[];
+
+[[vk::binding(1,0)]]
+SamplerState samplers[];
 
 [[vk::push_constant]]
 PushConstants push;
@@ -28,28 +36,49 @@ PushConstants push;
 [shader("vertex")]
 VSOutput vs_main(uint vertexID: SV_VertexID, uint instanceID: SV_InstanceID)
 {
-  VSOutput o;
+    VSOutput o;
 
-  uint   globalVertexID = instanceID * 3 + vertexID;
-  Vertex v              = push.vertexBuffer[globalVertexID];
+    Vertex v = push.vertex_ptr[vertexID];
 
-  o.position = mul(push.viewProj, float4(v.pos, 0, 1));
-  o.color    = v.color;
-
-#if defined(DEBUG_PRINTF) && DEBUG_PRINTF
-  // Debug Printf: limit output to avoid flooding
-  {
-    printf("Instance %u Vertex %u Global %u pos=(%f, %f) color=(%f, %f, %f)\n", instanceID, vertexID, globalVertexID,
-           v.pos.x, v.pos.y, v.color.r, v.color.g, v.color.b);
-  }
+#if DEBUG_PRINTF
+    printf("vertexID=%u pos=(%f,%f,%f)\n",
+        vertexID,
+        v.pos.x, v.pos.y, v.pos.z);
 #endif
 
-  return o;
+    o.position = mul(push.viewProj, float4(v.pos,1));
+
+
+o.uv = v.uv;
+
+#if DEBUG_PRINTF
+    printf("clip=(%f,%f,%f,%f)\n",
+        o.position.x,
+        o.position.y,
+        o.position.z,
+        o.position.w);
+#endif
+
+    return o;
 }
 
 [shader("fragment")]
-float4 fs_main(VSOutput input)
-    : SV_Target0
+float4 fs_main(VSOutput input) : SV_Target0
 {
-  return float4(input.color, 1);
+// #if DEBUG_PRINTF
+//     printf("uv=(%f,%f) tex=%u samp=%u\n",
+//         input.uv.x,
+//         input.uv.y,
+//         push.texture_id,
+//         push.sampler_id);
+// #endif
+
+    Texture2D tex = textures[push.texture_id];
+    SamplerState samp = samplers[push.sampler_id];
+
+    return tex.Sample(samp, input.uv);
 }
+
+
+
+

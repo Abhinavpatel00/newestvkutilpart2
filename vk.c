@@ -1,4 +1,5 @@
 #include "vk.h"
+#include "flow/flow.h"
 #include "tinytypes.h"
 #include <errno.h>
 #include <stdbool.h>
@@ -767,7 +768,6 @@ void imgui_init(GLFWwindow*       window,
     ImGui_ImplVulkan_Init(&info);
 }
 
-
 void renderer_create(Renderer* r, RendererDesc* desc)
 {
 
@@ -1144,7 +1144,7 @@ void renderer_create(Renderer* r, RendererDesc* desc)
     r->pipeline_cache = pipeline_cache_load_or_create(r->device, r->physical_device, "pipeline_cache.bin");
     VkDescriptorSetLayoutBinding bindings[] = {// textures
                                                {
-                                                   .binding         = 0,
+                                                   .binding         = BINDLESS_TEXTURE_BINDING,
                                                    .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
                                                    .descriptorCount = desc->bindless_sampled_image_count,
                                                    .stageFlags      = VK_SHADER_STAGE_ALL,
@@ -1152,7 +1152,7 @@ void renderer_create(Renderer* r, RendererDesc* desc)
 
                                                // samplers
                                                {
-                                                   .binding         = 1,
+                                                   .binding         = BINDLESS_SAMPLER_BINDING,
                                                    .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLER,
                                                    .descriptorCount = desc->bindless_sampler_count,
                                                    .stageFlags      = VK_SHADER_STAGE_ALL,
@@ -1160,7 +1160,7 @@ void renderer_create(Renderer* r, RendererDesc* desc)
 
                                                // storage images
                                                {
-                                                   .binding         = 2,
+                                                   .binding         = BINDLESS_STORAGE_IMAGE_BINDING,
                                                    .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                                                    .descriptorCount = desc->bindless_storage_image_count,
                                                    .stageFlags      = VK_SHADER_STAGE_ALL,
@@ -1291,35 +1291,62 @@ void renderer_create(Renderer* r, RendererDesc* desc)
     };
 
     vkCreateDescriptorPool(r->device, &pool_info, NULL, &r->imgui_pool);
-
+    VkFormat depth_format = pick_depth_format(r->physical_device);
     imgui_init(r->window, r->instance.instance, r->physical_device, r->device, r->graphics_queue_index,
                r->graphics_queue, r->imgui_pool, r->swapchain.image_count, r->swapchain.image_count,
-               r->swapchain.format, VK_FORMAT_UNDEFINED, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
-
+               r->swapchain.format, depth_format, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
 
 
     flow_id_pool_init(&r->texture_pool, MAX_BINDLESS_TEXTURES);
+    flow_id_pool_init(&r->sampler_pool, MAX_BINDLESS_SAMPLERS);
 
 
+    RenderTargetSpec depth_spec = {.width  = r->swapchain.extent.width,
+                                   .height = r->swapchain.extent.height,
+                                   .layers = 1,
+
+                                   .format = depth_format,
+
+                                   .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+
+                                   .aspect = VK_IMAGE_ASPECT_DEPTH_BIT,
+
+                                   .mip_count  = 1,
+                                   .debug_name = "depth_buffer"};
+    RenderTargetSpec hdr_spec   = {.width      = r->swapchain.extent.width,
+                                   .height     = r->swapchain.extent.height,
+                                   .layers     = 1,
+                                   .format     = VK_FORMAT_R16G16B16A16_SFLOAT,
+                                   .usage      = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                   .mip_count  = 1,
+                                   .debug_name = "hdr_color"};
 
 
+    forEach(i, r->swapchain.image_count)
+    {
 
-
-
-
-
-
-
-
-
-    VkFormat depth_format = pick_depth_format(r->physical_device);
-
-
+        rt_create(r, &r->depth[i], &depth_spec);
+        rt_create(r, &r->hdr_color[i], &hdr_spec);
+    }
+    {
+        r->dummy_texture = load_texture(r, "data/dummy_texture.png");
+    };
+    {
+        forEach(i, MAX_FRAMES_IN_FLIGHT)
+        {
+            gpu_profiler_init(&r->gpuprofiler[i], r->device, r->info.properties.limits.timestampPeriod, desc->enable_pipeline_stats);
+        }
+    }
 }
 
 void renderer_destroy(Renderer* r)
 {
     vkDeviceWaitIdle(r->device);
+
+    forEach(i, MAX_FRAMES_IN_FLIGHT)
+    {
+        gpu_profiler_destroy(&r->gpuprofiler[i], r->device);
+    }
 
     pipeline_cache_save(r->device, r->physical_device, r->pipeline_cache, "pipeline_cache.bin");
 
@@ -1898,91 +1925,6 @@ static VkShaderModule create_shader_module(VkDevice device, const void* code, si
 }
 
 
-typedef struct ReflectedShader
-{
-    VkDescriptorSetLayoutBinding sets[VK_MAX_PIPELINE_SETS][MAX_BINDINGS_PER_SET];
-    VkDescriptorBindingFlags     flags[VK_MAX_PIPELINE_SETS][MAX_BINDINGS_PER_SET];
-
-    uint32_t binding_counts[VK_MAX_PIPELINE_SETS];
-
-    VkDescriptorSetLayoutCreateFlags set_create_flags[VK_MAX_PIPELINE_SETS];
-
-    uint32_t set_count;
-
-    VkPushConstantRange push_ranges[VK_MAX_PUSH_RANGES];
-    uint32_t            push_count;
-
-} ReflectedShader;
-
-
-static void reflect_spirv(const void* code, size_t size, VkShaderStageFlagBits stage, ReflectedShader* out)
-{
-    SpvReflectShaderModule module;
-
-    SpvReflectResult res = spvReflectCreateShaderModule(size, code, &module);
-
-    assert(res == SPV_REFLECT_RESULT_SUCCESS);
-
-    uint32_t set_count = 0;
-    spvReflectEnumerateDescriptorSets(&module, &set_count, NULL);
-
-    SpvReflectDescriptorSet* sets[VK_MAX_PIPELINE_SETS];
-
-    spvReflectEnumerateDescriptorSets(&module, &set_count, sets);
-
-    forEach(s, set_count)
-    {
-        SpvReflectDescriptorSet* set = sets[s];
-
-        uint32_t set_index = set->set;
-
-        if(set_index >= out->set_count)
-            out->set_count = set_index + 1;
-
-        out->set_create_flags[set_index] = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
-
-        forEach(b, set->binding_count)
-        {
-            SpvReflectDescriptorBinding* refl = set->bindings[b];
-
-            uint32_t idx = out->binding_counts[set_index]++;
-
-            VkDescriptorSetLayoutBinding* dst = &out->sets[set_index][idx];
-
-            dst->binding        = refl->binding;
-            dst->descriptorType = (VkDescriptorType)refl->descriptor_type;
-
-            dst->descriptorCount = refl->count;
-
-            dst->stageFlags |= stage;
-
-            out->flags[set_index][idx] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
-        }
-    }
-
-    // Push constants
-
-    uint32_t push_count = 0;
-
-    spvReflectEnumeratePushConstantBlocks(&module, &push_count, NULL);
-
-    SpvReflectBlockVariable* pushes[VK_MAX_PUSH_RANGES];
-
-    spvReflectEnumeratePushConstantBlocks(&module, &push_count, pushes);
-
-    forEach(i, push_count)
-    {
-        out->push_ranges[out->push_count++] = (VkPushConstantRange){
-            .offset     = pushes[i]->offset,
-            .size       = pushes[i]->size,
-            .stageFlags = stage,
-        };
-    }
-
-    spvReflectDestroyShaderModule(&module);
-}
-
-
 VkPipeline create_graphics_pipeline(Renderer* renderer, const GraphicsPipelineConfig* cfg)
 {
     void*  vs_code = NULL;
@@ -2119,21 +2061,6 @@ VkPipeline create_graphics_pipeline(Renderer* renderer, const GraphicsPipelineCo
     };
 
 
-    ReflectedShader refl = {0};
-
-    reflect_spirv(vs_code, vs_size, VK_SHADER_STAGE_VERTEX_BIT, &refl);
-
-    reflect_spirv(fs_code, fs_size, VK_SHADER_STAGE_FRAGMENT_BIT, &refl);
-
-
-    const VkDescriptorSetLayoutBinding* set_bindings[VK_MAX_PIPELINE_SETS];
-    const VkDescriptorBindingFlags*     set_flags[VK_MAX_PIPELINE_SETS];
-
-    for(uint32_t i = 0; i < refl.set_count; i++)
-    {
-        set_bindings[i] = refl.sets[i];
-        set_flags[i]    = refl.flags[i];
-    }
     VkGraphicsPipelineCreateInfo pipe = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
 
@@ -2185,40 +2112,14 @@ VkPipeline create_compute_pipeline(Renderer* renderer, const char* compute_path)
     if(!read_file(compute_path, &code, &size))
         abort();
 
-    VkShaderModule module = create_shader_module(renderer->device, code, size);
-
-    ReflectedShader refl = {0};
-
-    reflect_spirv(code, size, VK_SHADER_STAGE_COMPUTE_BIT, &refl);
-
-    free(code);
-
-
-    const VkDescriptorSetLayoutBinding* set_bindings[VK_MAX_PIPELINE_SETS] = {0};
-
-    const VkDescriptorBindingFlags* set_flags[VK_MAX_PIPELINE_SETS] = {0};
-
-    for(uint32_t i = 0; i < refl.set_count; i++)
-    {
-        set_bindings[i] = refl.sets[i];
-        set_flags[i]    = refl.flags[i];
-    }
-
-    //
-    // VkPipelineLayout layout =
-    //     pipeline_layout_cache_build(renderer->device, &renderer->descriptor_layout_cache,
-    //                                 &renderer->pipeline_layout_cache, set_bindings, refl.binding_counts,
-    //                                 refl.set_create_flags, set_flags, refl.set_count, refl.push_ranges, refl.push_count);
-
-    VkPipelineLayout layout = renderer->bindless_system.pipeline_layout;
-
-    VkPipelineShaderStageCreateInfo stage = {
-        .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
-        .module = module,
-        .pName  = "main",
+    VkShaderModule                  module = create_shader_module(renderer->device, code, size);
+    VkPipelineLayout                layout = renderer->bindless_system.pipeline_layout;
+    VkPipelineShaderStageCreateInfo stage  = {
+         .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+         .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
+         .module = module,
+         .pName  = "main",
     };
-
     VkComputePipelineCreateInfo ci = {
         .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
         .stage  = stage,
@@ -2459,4 +2360,536 @@ VkPresentModeKHR vk_swapchain_select_present_mode(VkPhysicalDevice physical_devi
     }
 
     return best;
+}
+
+bool create_buffer(Renderer* r, VkDeviceSize size, VkBufferUsageFlags usage, VmaMemoryUsage memory_usage, Buffer* out)
+{
+    VkBufferCreateInfo buffer_info = {
+        .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size        = size,
+        .usage       = usage,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+
+    VmaAllocationCreateInfo alloc_info = {.usage = memory_usage};
+
+    if(vmaCreateBuffer(r->vmaallocator, &buffer_info, &alloc_info, &out->buffer, &out->allocation, NULL) != VK_SUCCESS)
+    {
+        return false;
+    }
+
+    out->buffer_size = size;
+
+    vmaMapMemory(r->vmaallocator, out->allocation, (void**)&out->mapping);
+
+    if(usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT)
+    {
+        VkBufferDeviceAddressInfo addr_info = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = out->buffer};
+
+        out->address = vkGetBufferDeviceAddress(r->device, &addr_info);
+    }
+
+    return true;
+}
+
+void destroy_buffer(Renderer* r, Buffer* b)
+{
+    if(!b->buffer)
+        return;
+
+    vmaUnmapMemory(r->vmaallocator, b->allocation);
+    vmaDestroyBuffer(r->vmaallocator, b->buffer, b->allocation);
+
+    memset(b, 0, sizeof(*b));
+}
+static FLOW_INLINE VkImageAspectFlags get_image_aspect(VkFormat format)
+{
+    switch(format)
+    {
+        case VK_FORMAT_D16_UNORM:
+        case VK_FORMAT_D32_SFLOAT:
+        case VK_FORMAT_D24_UNORM_S8_UINT:
+        case VK_FORMAT_D32_SFLOAT_S8_UINT:
+            return VK_IMAGE_ASPECT_DEPTH_BIT;
+
+        case VK_FORMAT_S8_UINT:
+            return VK_IMAGE_ASPECT_STENCIL_BIT;
+
+        default:
+            return VK_IMAGE_ASPECT_COLOR_BIT;
+    }
+}
+TextureID create_texture(Renderer* r, const TextureCreateDesc* desc)
+{
+    TextureID id;
+
+    if(!flow_id_pool_create_id(&r->texture_pool, &id))
+    {
+        fprintf(stderr, "Texture pool exhausted\n");
+        return UINT32_MAX;
+    }
+
+    Texture* tex = &r->textures[id];
+
+    tex->width     = desc->width;
+    tex->height    = desc->height;
+    tex->mip_count = desc->mip_count;
+    tex->format    = desc->format;
+
+    VkImageCreateInfo image_info = {
+        .sType     = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = VK_IMAGE_TYPE_2D,
+
+        .extent.width  = desc->width,
+        .extent.height = desc->height,
+        .extent.depth  = 1,
+
+        .mipLevels   = desc->mip_count,
+        .arrayLayers = 1,
+
+        .format = desc->format,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .samples       = VK_SAMPLE_COUNT_1_BIT,
+        .sharingMode   = VK_SHARING_MODE_EXCLUSIVE,
+
+        .usage = desc->usage,
+    };
+
+    VmaAllocationCreateInfo alloc_info = {.usage = VMA_MEMORY_USAGE_GPU_ONLY};
+
+    vmaCreateImage(r->vmaallocator, &image_info, &alloc_info, &tex->image, &tex->allocation, NULL);
+
+    VkImageViewCreateInfo view_info = {.sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                                       .image    = tex->image,
+                                       .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                                       .format   = desc->format,
+
+                                       .subresourceRange.aspectMask     = get_image_aspect(desc->format),
+                                       .subresourceRange.baseMipLevel   = 0,
+                                       .subresourceRange.levelCount     = desc->mip_count,
+                                       .subresourceRange.baseArrayLayer = 0,
+                                       .subresourceRange.layerCount     = 1};
+
+    vkCreateImageView(r->device, &view_info, r->allocatorcallbacks, &tex->view);
+
+    tex->valid = true;
+
+    VkDescriptorImageInfo img = {.imageView = tex->view, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+
+    if(desc->usage & VK_IMAGE_USAGE_SAMPLED_BIT)
+    {
+        VkDescriptorImageInfo img = {.imageView = tex->view, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+
+        VkWriteDescriptorSet write = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+
+                                      .dstSet          = r->bindless_system.set,
+                                      .dstBinding      = BINDLESS_TEXTURE_BINDING,
+                                      .dstArrayElement = id,
+
+                                      .descriptorCount = 1,
+                                      .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                                      .pImageInfo      = &img};
+
+        vkUpdateDescriptorSets(r->device, 1, &write, 0, NULL);
+    }
+
+
+    if(desc->usage & VK_IMAGE_USAGE_STORAGE_BIT)
+    {
+        VkDescriptorImageInfo img = {.imageView = tex->view, .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
+
+        VkWriteDescriptorSet write = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+
+                                      .dstSet          = r->bindless_system.set,
+                                      .dstBinding      = BINDLESS_STORAGE_IMAGE_BINDING,
+                                      .dstArrayElement = id,
+
+                                      .descriptorCount = 1,
+                                      .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                      .pImageInfo      = &img};
+
+        vkUpdateDescriptorSets(r->device, 1, &write, 0, NULL);
+    }
+
+
+    return id;
+}
+
+TextureID load_texture(Renderer* r, const char* path)
+{
+    uint32_t       w, h, c;
+    unsigned char* pixels = stbi_load(path, &w, &h, &c, 4);
+    if(!pixels)
+    {
+        fprintf(stderr, "Failed to load %s\n", path);
+        return UINT32_MAX;
+    }
+    TextureCreateDesc desc       = {.width     = w,
+                                    .height    = h,
+                                    .mip_count = 1,
+                                    .format    = VK_FORMAT_R8G8B8A8_UNORM,
+                                    .usage     = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT};
+    TextureID         id         = create_texture(r, &desc);
+    Texture*          tex        = &r->textures[id];
+    VkDeviceSize      image_size = w * h * 4;
+    Buffer            staging;
+    create_buffer(r, image_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, &staging);
+    memcpy(staging.mapping, pixels, image_size);
+    stbi_image_free(pixels);
+    VkCommandBuffer      cmd      = vk_begin_one_time_cmd(r->device, r->one_time_gfx_pool);
+    VkImageMemoryBarrier barrier1 = {
+        .sType                       = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .oldLayout                   = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout                   = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .srcAccessMask               = 0,
+        .dstAccessMask               = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .image                       = tex->image,
+        .subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .subresourceRange.levelCount = tex->mip_count,
+        .subresourceRange.layerCount = 1,
+    };
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier1);
+    VkBufferImageCopy region = {.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                                .imageSubresource.layerCount = 1,
+                                .imageExtent                 = {w, h, 1}};
+    vkCmdCopyBufferToImage(cmd, staging.buffer, tex->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    VkImageMemoryBarrier barrier2 = barrier1;
+    barrier2.oldLayout            = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier2.newLayout            = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier2.srcAccessMask        = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier2.dstAccessMask        = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0,
+                         NULL, 1, &barrier2);
+    vk_end_one_time_cmd(r->device, r->graphics_queue, r->one_time_gfx_pool, cmd);
+    destroy_buffer(r, &staging);
+    return id;
+}
+
+
+SamplerID create_sampler(Renderer* r, const SamplerCreateDesc* desc)
+{
+    SamplerID id;
+
+    if(!flow_id_pool_create_id(&r->sampler_pool, &id))
+    {
+        fprintf(stderr, "Sampler pool exhausted\n");
+        return UINT32_MAX;
+    }
+
+    VkSamplerCreateInfo info = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+
+                                .magFilter = desc->mag_filter,
+                                .minFilter = desc->min_filter,
+
+                                .addressModeU = desc->address_u,
+                                .addressModeV = desc->address_v,
+                                .addressModeW = desc->address_w,
+
+                                .mipmapMode = desc->mipmap_mode,
+
+                                .minLod = 0.0f,
+                                .maxLod = desc->max_lod};
+
+    VK_CHECK(vkCreateSampler(r->device, &info, r->allocatorcallbacks, &r->sampler[id]));
+
+    VkDescriptorImageInfo sampler_info = {.sampler = r->sampler[id]};
+
+    VkWriteDescriptorSet write = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+
+                                  .dstSet          = r->bindless_system.set,
+                                  .dstBinding      = BINDLESS_SAMPLER_BINDING,
+                                  .dstArrayElement = id,
+
+                                  .descriptorCount = 1,
+                                  .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLER,
+                                  .pImageInfo      = &sampler_info};
+
+    vkUpdateDescriptorSets(r->device, 1, &write, 0, NULL);
+
+    return id;
+}
+
+void destroy_sampler(Renderer* r, SamplerID id)
+{
+    VkSampler sampler = r->sampler[id];
+
+    if(!sampler)
+        return;
+
+    vkDestroySampler(r->device, sampler, r->allocatorcallbacks);
+
+    r->sampler[id] = VK_NULL_HANDLE;
+
+    flow_id_pool_destroy_id(&r->sampler_pool, id);
+}
+
+
+// create_texture()        -> allocate GPU image
+// upload_texture_data()   -> copy pixels
+// load_texture_file()     -> disk I/O
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+
+
+internal uint32_t rt_compute_mip_count(uint32_t w, uint32_t h)
+{
+    uint32_t max_dim = w > h ? w : h;
+    uint32_t mips    = 1;
+    while(max_dim > 1)
+    {
+        max_dim >>= 1;
+        mips++;
+    }
+    return mips;
+}
+
+
+bool rt_create(Renderer* r, RenderTarget* rt, const RenderTargetSpec* spec)
+
+
+{
+    if(!r || !rt || !spec || spec->width == 0 || spec->height == 0)
+        return false;
+
+    memset(rt, 0, sizeof(*rt));
+
+    rt->format = spec->format;
+    rt->width  = spec->width;
+    rt->height = spec->height;
+    rt->usage  = spec->usage;
+    rt->aspect = spec->aspect ? spec->aspect : get_image_aspect(spec->format);
+    rt->layers = spec->layers;
+    // Mip count
+    uint32_t mips = spec->mip_count;
+    if(mips == 0)
+        mips = rt_compute_mip_count(spec->width, spec->height);
+    if(mips > RT_MAX_MIPS)
+        mips = RT_MAX_MIPS;
+    rt->mip_count = mips;
+
+    // // Bindless slots unused until registered
+    // rt->sampled_id = UINT32_MAX;
+    // rt->storage_id = UINT32_MAX;
+    //
+    // Create image
+    VkImageCreateInfo image_info = {
+        .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType     = VK_IMAGE_TYPE_2D,
+        .format        = rt->format,
+        .extent        = {rt->width, rt->height, 1},
+        .mipLevels     = rt->mip_count,
+        .arrayLayers   = spec->layers,
+        .samples       = VK_SAMPLE_COUNT_1_BIT,
+        .tiling        = VK_IMAGE_TILING_OPTIMAL,
+        .usage         = rt->usage,
+        .sharingMode   = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+
+    VmaAllocationCreateInfo alloc_info = {
+        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+        .flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT,
+    };
+
+    VkResult res = vmaCreateImage(r->vmaallocator, &image_info, &alloc_info, &rt->image, &rt->allocation, NULL);
+    if(res != VK_SUCCESS)
+    {
+        log_error("[rt_create] vmaCreateImage failed: %d", res);
+        return false;
+    }
+
+    // Full mip chain view (for sampling)
+    VkImageViewCreateInfo view_info = {
+        .sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image    = rt->image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format   = rt->format,
+        .subresourceRange =
+            {
+                .aspectMask     = rt->aspect,
+                .baseMipLevel   = 0,
+                .levelCount     = rt->mip_count,
+                .baseArrayLayer = 0,
+                .layerCount     = 1,
+            },
+    };
+
+    VK_CHECK(vkCreateImageView(r->device, &view_info, NULL, &rt->view));
+
+    // Per-mip views (for attachment use)
+    for(uint32_t mip = 0; mip < rt->mip_count; mip++)
+    {
+        VkImageViewCreateInfo mip_view_info = {
+            .sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image    = rt->image,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format   = rt->format,
+            .subresourceRange =
+                {
+                    .aspectMask     = rt->aspect,
+                    .baseMipLevel   = mip,
+                    .levelCount     = 1,
+                    .baseArrayLayer = 0,
+                    .layerCount     = 1,
+                },
+        };
+        VK_CHECK(vkCreateImageView(r->device, &mip_view_info, NULL, &rt->mip_views[mip]));
+    }
+
+    // Init per-mip states to undefined
+    for(uint32_t mip = 0; mip < rt->mip_count; mip++)
+    {
+        rt->mip_states[mip] = (ImageState){
+            .stage        = VK_PIPELINE_STAGE_2_NONE,
+            .access       = VK_ACCESS_2_NONE,
+            .layout       = VK_IMAGE_LAYOUT_UNDEFINED,
+            .queue_family = VK_QUEUE_FAMILY_IGNORED,
+            .validity     = IMAGE_STATE_UNDEFINED,
+            .dirty_mips   = 0,
+        };
+    }
+
+    if(spec->debug_name)
+    {
+        (void)spec->debug_name;  // for future VK_EXT_debug_utils
+    }
+
+    uint32_t id;
+
+    if(!flow_id_pool_create_id(&r->texture_pool, &id))
+    {
+        fprintf(stderr, "Texture pool exhausted\n");
+        return UINT32_MAX;
+    }
+    rt->bindless_index = id;
+
+    if(spec->usage & VK_IMAGE_USAGE_SAMPLED_BIT)
+    {
+        VkDescriptorImageInfo img = {.imageView = rt->view, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+
+        VkWriteDescriptorSet write = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+
+                                      .dstSet          = r->bindless_system.set,
+                                      .dstBinding      = BINDLESS_TEXTURE_BINDING,
+                                      .dstArrayElement = id,
+
+                                      .descriptorCount = 1,
+                                      .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                                      .pImageInfo      = &img};
+
+        vkUpdateDescriptorSets(r->device, 1, &write, 0, NULL);
+    }
+    if(spec->usage & VK_IMAGE_USAGE_STORAGE_BIT)
+    {
+        VkDescriptorImageInfo img = {.imageView = rt->view, .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
+
+        VkWriteDescriptorSet write = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+
+                                      .dstSet          = r->bindless_system.set,
+                                      .dstBinding      = BINDLESS_STORAGE_IMAGE_BINDING,
+                                      .dstArrayElement = id,
+
+                                      .descriptorCount = 1,
+                                      .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                      .pImageInfo      = &img};
+
+        vkUpdateDescriptorSets(r->device, 1, &write, 0, NULL);
+    }
+
+    log_info("[rt_create] %ux%u fmt=%d mips=%u ", rt->width, rt->height, rt->format, rt->mip_count);
+    return true;
+}
+
+void rt_destroy(Renderer* r, RenderTarget* rt)
+{
+    if(!r || !rt || !rt->image)
+        return;
+
+    uint32_t id = rt->bindless_index;
+
+    if(id != UINT32_MAX)
+    {
+        // Clear sampled descriptor if used
+        if(rt->usage & VK_IMAGE_USAGE_SAMPLED_BIT)
+        {
+            VkDescriptorImageInfo img = {.imageView = r->textures[r->dummy_texture].view, .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
+
+            VkWriteDescriptorSet write = {.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                          .dstSet          = r->bindless_system.set,
+                                          .dstBinding      = BINDLESS_TEXTURE_BINDING,
+                                          .dstArrayElement = id,
+                                          .descriptorCount = 1,
+                                          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                                          .pImageInfo      = &img};
+
+            vkUpdateDescriptorSets(r->device, 1, &write, 0, NULL);
+        }
+
+        // Clear storage descriptor if used
+        if(rt->usage & VK_IMAGE_USAGE_STORAGE_BIT)
+        {
+            VkDescriptorImageInfo img = {.imageView = r->textures[r->dummy_texture].view, .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
+
+            VkWriteDescriptorSet write = {.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                          .dstSet          = r->bindless_system.set,
+                                          .dstBinding      = BINDLESS_STORAGE_IMAGE_BINDING,
+                                          .dstArrayElement = id,
+                                          .descriptorCount = 1,
+                                          .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                          .pImageInfo      = &img};
+
+            vkUpdateDescriptorSets(r->device, 1, &write, 0, NULL);
+        }
+
+        flow_id_pool_destroy_id(&r->texture_pool, id);
+    }
+
+    if(rt->view)
+        vkDestroyImageView(r->device, rt->view, NULL);
+
+    for(uint32_t i = 0; i < rt->mip_count; i++)
+    {
+        if(rt->mip_views[i])
+            vkDestroyImageView(r->device, rt->mip_views[i], NULL);
+    }
+
+    if(rt->image)
+        vmaDestroyImage(r->vmaallocator, rt->image, rt->allocation);
+
+    memset(rt, 0, sizeof(*rt));
+}
+
+
+bool rt_resize(Renderer* r, RenderTarget* rt, uint32_t width, uint32_t height)
+
+
+{
+    if(!r || !rt)
+        return false;
+
+    if(width == rt->width && height == rt->height)
+        return true;
+
+    RenderTargetSpec spec = {.width      = width,
+                             .height     = height,
+                             .layers     = rt->layers,
+                             .format     = rt->format,
+                             .usage      = rt->usage,
+                             .aspect     = rt->aspect,
+                             .mip_count  = rt->mip_count,
+                             .debug_name = rt->debug_name};
+
+    rt_destroy(r, rt);
+
+    return rt_create(r, rt, &spec);
 }

@@ -16,7 +16,7 @@ rm -f compiledshaders/triangle.vert.spv compiledshaders/triangle.frag.spv
 ./compileslang.sh
 
 # Build app
-./nob
+make release
 
 # Run normally
 ./build/app

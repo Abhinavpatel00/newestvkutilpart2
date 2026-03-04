@@ -1,9 +1,11 @@
-#include "external/cglm/include/cglm/cglm.h"
-#include "external/cglm/include/cglm/types.h"
+
 #include "tinytypes.h"
 #include "vk_default.h"
 #include "vk.h"
 #include <GLFW/glfw3.h>
+#include <stdalign.h>
+#include <stddef.h>
+#include <time.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -13,6 +15,14 @@
 #define MB(x) ((x) * 1024ULL * 1024ULL)
 #define GB(x) ((x) * 1024ULL * 1024ULL * 1024ULL)
 #define PAD(name, size) uint8_t name[(size)]
+static inline uint64_t time_now_ns()
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+}
+#define RUN_ONCE for(static int _once = 1; _once; _once = 0)
+
 #define PUSH_CONSTANT(name, BODY)                                                                                      \
     typedef struct ALIGNAS(16) name_init                                                                               \
     {                                                                                                                  \
@@ -29,80 +39,12 @@
     } name;                                                                                                            \
                                                                                                                        \
     _Static_assert(sizeof(name) == 256, "Push constant != 256");
-typedef struct Buffer
-{
-    VkBuffer        buffer;  // vulkan buffer
-    VkDeviceSize    buffer_size;
-    VkDeviceAddress address;     // addr of the buffer in the shader
-    uint8_t*        mapping;     //this is a CPU pointer directly into GPU-visible memory.
-    VmaAllocation   allocation;  // Memory associated with the buffer
-} Buffer;
-
 typedef struct
 {
-    float pos[2];
-    float color[3];
+    float pos[3];
+    float uv[2];
 } Vertex;
-typedef struct
-{
-    uint32_t i, j, k;
-} Tri;
 
-typedef struct
-{
-    Tri*     tris;
-    uint32_t count;
-} Triangulation;
-
-typedef struct
-{
-    Triangulation* data;
-    uint32_t       count;
-} TriList;
-
-TriList generate(uint32_t start, uint32_t end)
-{
-    TriList result = {0};
-
-    if(end - start < 2)
-    {
-        result.data          = malloc(sizeof(Triangulation));
-        result.data[0].tris  = NULL;
-        result.data[0].count = 0;
-        result.count         = 1;
-        return result;
-    }
-
-    for(uint32_t k = start + 1; k < end; k++)
-    {
-        TriList left  = generate(start, k);
-        TriList right = generate(k, end);
-
-        for(uint32_t i = 0; i < left.count; i++)
-        {
-            for(uint32_t j = 0; j < right.count; j++)
-            {
-
-                uint32_t total = left.data[i].count + right.data[j].count + 1;
-
-                Triangulation t = {0};
-                t.tris          = malloc(sizeof(Tri) * total);
-
-                memcpy(t.tris, left.data[i].tris, left.data[i].count * sizeof(Tri));
-
-                memcpy(t.tris + left.data[i].count, right.data[j].tris, right.data[j].count * sizeof(Tri));
-
-                t.tris[total - 1] = (Tri){start, k, end};
-                t.count           = total;
-
-                result.data                 = realloc(result.data, sizeof(Triangulation) * (result.count + 1));
-                result.data[result.count++] = t;
-            }
-        }
-    }
-
-    return result;
-}
 // whatare these GPU uniform block
 // Cluster grid
 // Culling results buffer
@@ -135,37 +77,35 @@ typedef struct RenderPipelines
     VkPipeline pipelines[PIPELINE_COUNT];
 } RendererPipelines;
 
-typedef struct
+
+// Entity = ID
+// Component = data
+// System = logic
+
+void print_device_extensions(VkPhysicalDevice phys)
 {
-    vec3  position;
-    float yaw;    // radians
-    float pitch;  // radians
-    float move_speed;
-    float look_speed;
-    float fov_y;
-    float near_z;
-    float far_z;
-} Camera;
+    uint32_t count = 0;
 
-static FORCE_INLINE void camera_build_proj_reverse_z_infinite(mat4 out_proj, Camera* cam, float aspect)
-{
-    float f = 1.0f / tanf(cam->fov_y * 0.5f);
-    float n = cam->near_z;
+    vkEnumerateDeviceExtensionProperties(phys, NULL, &count, NULL);
 
-    glm_mat4_zero(out_proj);
+    VkExtensionProperties* extensions = malloc(sizeof(VkExtensionProperties) * count);
 
-    out_proj[0][0] = f / aspect;
-    out_proj[1][1] = f;
+    vkEnumerateDeviceExtensionProperties(phys, NULL, &count, extensions);
 
-    // Reverse-Z, infinite far
-    out_proj[2][2] = 0.0f;
-    out_proj[2][3] = -1.0f;
+    printf("Device supports %u extensions:\n\n", count);
 
-    out_proj[3][2] = n;
-    out_proj[3][3] = 0.0f;
+    for(uint32_t i = 0; i < count; i++)
+    {
+
+
+        printf("%-40s  spec %u\n", extensions[i].extensionName, extensions[i].specVersion);
+    }
+
+    free(extensions);
 }
 
-#define VALIDATION true
+
+#define VALIDATION false
 static bool g_framebuffer_resized = false;
 int         main()
 {
@@ -175,7 +115,7 @@ int         main()
     else
         glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_WAYLAND);
     glfwInit();
-    const char* dev_exts[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+    const char* dev_exts[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME};
 
     u32          glfw_ext_count = 0;
     const char** glfw_exts      = glfwGetRequiredInstanceExtensions(&glfw_ext_count);
@@ -198,7 +138,7 @@ int         main()
 
             .instance_layer_count        = 0,
             .instance_extension_count    = glfw_ext_count,
-            .device_extension_count      = 1,
+            .device_extension_count      = 2,
             .enable_gpu_based_validation = VALIDATION,
             .enable_validation           = VALIDATION,
 
@@ -229,9 +169,11 @@ int         main()
         cfg.color_attachment_count                    = 1;
         cfg.color_formats                             = &renderer.swapchain.format;
         cfg.use_vertex_input                          = false;
-        cfg.polygon_mode                              = VK_POLYGON_MODE_LINE;
+        cfg.polygon_mode                              = VK_POLYGON_MODE_FILL;
         render_pipelines.pipelines[TRIANGLE_PIPELINE] = create_graphics_pipeline(&renderer, &cfg);
     }
+
+
     BufferPool pool = {0};
     buffer_pool_init(&renderer, &pool, MB(16),
                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
@@ -239,30 +181,6 @@ int         main()
                      VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT, 2048);
 
 
-    uint32_t n = 4;
-
-    uint32_t       max_triangles = 62202;  // allocate once for worst case
-    const uint32_t poly_vertices = n + 2;
-
-    uint32_t       vert_capacity = max_triangles * 3;
-    const uint32_t draw_count    = 1;
-
-    BufferSlice vertex_slice   = buffer_pool_alloc(&pool, sizeof(Vertex) * vert_capacity, 16);
-    BufferSlice indirect_slice = buffer_pool_alloc(&pool, sizeof(VkDrawIndirectCommand) * draw_count, 16);
-    BufferSlice count_slice    = buffer_pool_alloc(&pool, sizeof(uint32_t), 4);
-
-    Vertex*                cpu_vertices = (Vertex*)vertex_slice.mapped;
-    VkDrawIndirectCommand* cpu_indirect = (VkDrawIndirectCommand*)indirect_slice.mapped;
-    uint32_t*              cpu_count    = (uint32_t*)count_slice.mapped;
-
-
-    vmaFlushAllocation(renderer.vmaallocator, pool.allocation, vertex_slice.offset, sizeof(Vertex) * n * 3);
-
-
-    VkBufferDeviceAddressInfo addrInfo = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = pool.buffer};
-    VkDeviceAddress           gpu_address = vkGetBufferDeviceAddress(renderer.device, &addrInfo) + vertex_slice.offset;
-
-    PUSH_CONSTANT(Push, VkDeviceAddress vertex_ptr; float aspect; mat4 view_proj;);
     Camera cam = {
         .position   = {0.0f, 0.0f, 3.0f},
         .yaw        = 0.0f,
@@ -278,8 +196,12 @@ int         main()
     double last_time        = glfwGetTime();
     mat4   camera_view_proj = GLM_MAT4_IDENTITY_INIT;
 
+    uint64_t      frame_start  = time_now_ns();
+    static double cpu_frame_ms = 0.3;
     while(!glfwWindowShouldClose(renderer.window))
     {
+
+        frame_start = time_now_ns();
         glfwPollEvents();
 
         double now = glfwGetTime();
@@ -314,7 +236,6 @@ int         main()
                 mouse_captured = false;
             }
         }
-
 
         {  // camera
 
@@ -470,8 +391,11 @@ int         main()
             continue;  // restart frame cleanly
         }
         {
+
             vkWaitForFences(renderer.device, 1, &renderer.frames[renderer.current_frame].in_flight_fence, VK_TRUE, UINT64_MAX);
             vkResetFences(renderer.device, 1, &renderer.frames[renderer.current_frame].in_flight_fence);
+            GpuProfiler* frame_prof = &renderer.gpuprofiler[renderer.current_frame];
+            gpu_profiler_collect(frame_prof, renderer.device);
 
             /* reset EVERYTHING allocated for this frame */
             vkResetCommandPool(renderer.device, renderer.frames[renderer.current_frame].cmdbufpool, 0);
@@ -482,7 +406,6 @@ int         main()
         VkCommandBuffer cmd = renderer.frames[renderer.current_frame].cmdbuf;
         vk_cmd_begin(renderer.frames[renderer.current_frame].cmdbuf, false);
         {
-
             vkCmdBindDescriptorSets(renderer.frames[renderer.current_frame].cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     renderer.bindless_system.pipeline_layout, 0, 1, &renderer.bindless_system.set, 0, NULL);
             vkCmdBindDescriptorSets(renderer.frames[renderer.current_frame].cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -505,87 +428,192 @@ int         main()
                                      .colorAttachmentCount = 1,
                                      .pColorAttachments    = &color};
 
+        imgui_begin_frame();
+
+        GpuProfiler* frame_prof = &renderer.gpuprofiler[renderer.current_frame];
+
+        igBegin("Renderer Debug", NULL, 0);
+
+        igText("CPU frame: %.3f ms", cpu_frame_ms);
+        igText("FPS: %.1f", 1000.0f / cpu_frame_ms);
+
+        igSeparator();
+
+        igText("Camera Position");
+        igText("x: %.3f", cam.position[0]);
+        igText("y: %.3f", cam.position[1]);
+        igText("z: %.3f", cam.position[2]);
+
+        igSeparator();
+
+        igText("Yaw: %.3f", cam.yaw);
+        igText("Pitch: %.3f", cam.pitch);
+
+        igSeparator();
+        igText("GPU Profiler");
+        if(frame_prof->pass_count == 0)
+        {
+            igText("No GPU samples collected yet.");
+        }
+        for(uint32_t i = 0; i < frame_prof->pass_count; i++)
+        {
+            GpuPass* pass = &frame_prof->passes[i];
+            igText("%s: %.3f ms", pass->name, pass->time_ms);
+            if(frame_prof->enable_pipeline_stats)
+            {
+                igText("  VS: %llu | FS: %llu | Prim: %llu", (unsigned long long)pass->vs_invocations,
+                       (unsigned long long)pass->fs_invocations, (unsigned long long)pass->primitives);
+            }
+        }
+
+        igEnd();
+        igRender();
+
+        gpu_profiler_begin_frame(frame_prof, cmd);
+
+        GPU_SCOPE(frame_prof, cmd, "Main Pass", VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT)
         {
             vkCmdBeginRendering(cmd, &rendering);
-            imgui_begin_frame();
-            igBegin("Triangulation Control", NULL, 0);
+            static bool initialized = false;
 
-            igSliderInt("n", (int*)&n, 3, 12, "%d", 0);
-            igText("Catalan(n-2) grows brutally fast.");
-            igEnd();
-            igRender();
-            static uint32_t prev_n = 0;
+            static TextureID tex_id;
+            static SamplerID linear_sampler;
 
-            if(n != prev_n)
+            static BufferSlice vertex_slice;
+            static BufferSlice indirect_slice;
+            static BufferSlice count_slice;
+
+            static VkDeviceAddress gpu_address;
+
+            PUSH_CONSTANT(Push, VkDeviceAddress vertex_ptr; float aspect; uint32_t _pad0; float view_proj[4][4];
+                          uint32_t texture_id; uint32_t sampler_id;);
+            if(!initialized)
             {
-                // write code here we use immediate mode for experimentation
-                TriList  all        = generate(0, n - 1);
-                uint32_t tri_per    = n - 2;
-                uint32_t total_tris = all.count * tri_per;
+                tex_id = load_texture(&renderer, "/home/lk/myprojects/flowgame/data/PNG/Tiles/brick_red.png");
 
-                uint32_t v = 0;
+                SamplerCreateDesc desc = {.mag_filter = VK_FILTER_LINEAR,
+                                          .min_filter = VK_FILTER_LINEAR,
 
-                uint32_t cols = (uint32_t)ceilf(sqrtf((float)all.count));
-                uint32_t rows = (all.count + cols - 1) / cols;
+                                          .address_u = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+                                          .address_v = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+                                          .address_w = VK_SAMPLER_ADDRESS_MODE_REPEAT,
 
-                float cell_w = 2.0f / (float)cols;
-                float cell_h = 2.0f / (float)rows;
-                float radius = fminf(cell_w, cell_h) * 0.35f;
+                                          .mipmap_mode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+                                          .max_lod     = 1.0f};
 
-                for(uint32_t t = 0; t < all.count; t++)
-                {
-                    uint32_t row = t / cols;
-                    uint32_t col = t % cols;
+                linear_sampler = create_sampler(&renderer, &desc);
 
-                    float center_x = -1.0f + ((float)col + 0.5f) * cell_w;
-                    float center_y = 1.0f - ((float)row + 0.5f) * cell_h;
-                    for(uint32_t k = 0; k < all.data[t].count; k++)
-                    {
-                        Tri tri = all.data[t].tris[k];
+                /* allocate buffers */
 
-                        uint32_t idx[3] = {tri.i, tri.j, tri.k};
+                vertex_slice   = buffer_pool_alloc(&pool, sizeof(Vertex) * 36, 16);
+                indirect_slice = buffer_pool_alloc(&pool, sizeof(VkDrawIndirectCommand), 16);
+                count_slice    = buffer_pool_alloc(&pool, sizeof(uint32_t), 4);
 
-                        for(int m = 0; m < 3; m++)
-                        {
-                            float angle              = 2.0f * 3.1415926f * idx[m] / n;
-                            cpu_vertices[v].pos[0]   = center_x + cosf(angle) * radius;
-                            cpu_vertices[v].pos[1]   = center_y + sinf(angle) * radius;
-                            float hue                = (float)t / (float)all.count;
-                            cpu_vertices[v].color[0] = hue;
-                            cpu_vertices[v].color[1] = 0.2f;
-                            cpu_vertices[v].color[2] = 1.0f - hue;
+                Vertex*                cpu_vertices = (Vertex*)vertex_slice.mapped;
+                VkDrawIndirectCommand* cpu_indirect = (VkDrawIndirectCommand*)indirect_slice.mapped;
+                uint32_t*              cpu_count    = (uint32_t*)count_slice.mapped;
 
-                            v++;
-                        }
-                    }
-                }
+                /* cube with UVs */
+                Vertex cube_vertices[] = {// Back face
+                                          {{-0.5f, -0.5f, -0.5f}, {0.0f, 0.0f}},
+                                          {{0.5f, 0.5f, -0.5f}, {1.0f, 1.0f}},
+                                          {{0.5f, -0.5f, -0.5f}, {1.0f, 0.0f}},
+                                          {{0.5f, 0.5f, -0.5f}, {1.0f, 1.0f}},
+                                          {{-0.5f, -0.5f, -0.5f}, {0.0f, 0.0f}},
+                                          {{-0.5f, 0.5f, -0.5f}, {0.0f, 1.0f}},
+                                          // Front face
+                                          {{-0.5f, -0.5f, 0.5f}, {0.0f, 0.0f}},
+                                          {{0.5f, -0.5f, 0.5f}, {1.0f, 0.0f}},
+                                          {{0.5f, 0.5f, 0.5f}, {1.0f, 1.0f}},
+                                          {{0.5f, 0.5f, 0.5f}, {1.0f, 1.0f}},
+                                          {{-0.5f, 0.5f, 0.5f}, {0.0f, 1.0f}},
+                                          {{-0.5f, -0.5f, 0.5f}, {0.0f, 0.0f}},
+                                          // Left face
+                                          {{-0.5f, 0.5f, 0.5f}, {1.0f, 0.0f}},
+                                          {{-0.5f, 0.5f, -0.5f}, {1.0f, 1.0f}},
+                                          {{-0.5f, -0.5f, -0.5f}, {0.0f, 1.0f}},
+                                          {{-0.5f, -0.5f, -0.5f}, {0.0f, 1.0f}},
+                                          {{-0.5f, -0.5f, 0.5f}, {0.0f, 0.0f}},
+                                          {{-0.5f, 0.5f, 0.5f}, {1.0f, 0.0f}},
+                                          // Right face
+                                          {{0.5f, 0.5f, 0.5f}, {1.0f, 0.0f}},
+                                          {{0.5f, -0.5f, -0.5f}, {0.0f, 1.0f}},
+                                          {{0.5f, 0.5f, -0.5f}, {1.0f, 1.0f}},
+                                          {{0.5f, -0.5f, -0.5f}, {0.0f, 1.0f}},
+                                          {{0.5f, 0.5f, 0.5f}, {1.0f, 0.0f}},
+                                          {{0.5f, -0.5f, 0.5f}, {0.0f, 0.0f}},
+                                          // Bottom face
+                                          {{-0.5f, -0.5f, -0.5f}, {0.0f, 1.0f}},
+                                          {{0.5f, -0.5f, -0.5f}, {1.0f, 1.0f}},
+                                          {{0.5f, -0.5f, 0.5f}, {1.0f, 0.0f}},
+                                          {{0.5f, -0.5f, 0.5f}, {1.0f, 0.0f}},
+                                          {{-0.5f, -0.5f, 0.5f}, {0.0f, 0.0f}},
+                                          {{-0.5f, -0.5f, -0.5f}, {0.0f, 1.0f}},
+                                          // Top face
+                                          {{-0.5f, 0.5f, -0.5f}, {0.0f, 1.0f}},
+                                          {{-0.5f, 0.5f, 0.5f}, {0.0f, 0.0f}},
+                                          {{0.5f, 0.5f, 0.5f}, {1.0f, 0.0f}},
+                                          {{0.5f, 0.5f, 0.5f}, {1.0f, 0.0f}},
+                                          {{0.5f, 0.5f, -0.5f}, {1.0f, 1.0f}},
+                                          {{-0.5f, 0.5f, -0.5f}, {0.0f, 1.0f}}};
+                memcpy(cpu_vertices, cube_vertices, sizeof(cube_vertices));
 
-                cpu_indirect[0].vertexCount   = v;
+                /* indirect draw command */
+
+                cpu_indirect[0].vertexCount   = 36;
                 cpu_indirect[0].instanceCount = 1;
                 cpu_indirect[0].firstVertex   = 0;
                 cpu_indirect[0].firstInstance = 0;
 
                 *cpu_count = 1;
 
-                vmaFlushAllocation(renderer.vmaallocator, pool.allocation, vertex_slice.offset, sizeof(Vertex) * v);
+                /* flush */
 
-                prev_n = n;
+                vmaFlushAllocation(renderer.vmaallocator, pool.allocation, vertex_slice.offset, sizeof(Vertex) * 36);
+
+                vmaFlushAllocation(renderer.vmaallocator, pool.allocation, indirect_slice.offset, sizeof(VkDrawIndirectCommand));
+
+                vmaFlushAllocation(renderer.vmaallocator, pool.allocation, count_slice.offset, sizeof(uint32_t));
+
+                /* device address */
+
+                VkBufferDeviceAddressInfo addrInfo = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = pool.buffer};
+
+                gpu_address = vkGetBufferDeviceAddress(renderer.device, &addrInfo) + vertex_slice.offset;
+
+                initialized = true;
             }
-            ImDrawData* draw_data = igGetDrawData();
+
+
             {
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, render_pipelines.pipelines[TRIANGLE_PIPELINE]);
+
                 vk_cmd_set_viewport_scissor(cmd, renderer.swapchain.extent);
-                Push push       = {0};
+
+                Push push = {0};
+
                 push.vertex_ptr = gpu_address;
                 push.aspect     = (float)renderer.swapchain.extent.width / (float)renderer.swapchain.extent.height;
+
+                push.texture_id = tex_id;
+                push.sampler_id = linear_sampler;
+
                 glm_mat4_copy(camera_view_proj, push.view_proj);
+
                 vkCmdPushConstants(cmd, renderer.bindless_system.pipeline_layout, VK_SHADER_STAGE_ALL, 0, sizeof(Push), &push);
+
                 vkCmdDrawIndirectCount(cmd, indirect_slice.buffer, indirect_slice.offset, count_slice.buffer,
-                                       count_slice.offset, draw_count, sizeof(VkDrawIndirectCommand));
+                                       count_slice.offset, 1, sizeof(VkDrawIndirectCommand));
             }
+
+
             {
+
+                ImDrawData* draw_data = igGetDrawData();
                 ImGui_ImplVulkan_RenderDrawData(draw_data, cmd, VK_NULL_HANDLE);
             }
+
+
             vkCmdEndRendering(cmd);
         }
 
@@ -626,33 +654,24 @@ int         main()
 
             VK_CHECK(vkQueueSubmit2(renderer.graphics_queue, 1, &submit, renderer.frames[renderer.current_frame].in_flight_fence));
 
+
             vk_swapchain_present(renderer.present_queue, &renderer.swapchain,
                                  &renderer.swapchain.render_finished[renderer.swapchain.current_image], 1);
         }
         renderer.current_frame = (renderer.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+        uint64_t frame_end     = time_now_ns();
+
+        cpu_frame_ms = (frame_end - frame_start) / 1000000.0;
     }
 
-    printf("%zu", sizeof(Push));
-    printf("%zu", sizeof(BufferSlice));
-    printf("Alignment: %zu\n", _Alignof(Push));
 
+    printf(" renderer size is %zu", sizeof(Renderer));
+    printf(" rt is %zu", sizeof(RenderTarget));
     //    ANALYZE_STRUCT(ImageState);
     //renderer_destroy(&renderer);
     return 0;
 }
 
 
-
-
-
-
-
-
-
-
-
-
-
 // Q: Are ya shipping, son?
 // A: I'm building the pipeline that builds the pipeline.
-

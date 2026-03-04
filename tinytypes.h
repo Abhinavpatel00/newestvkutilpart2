@@ -19,7 +19,6 @@
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 0
 #include "external/VulkanMemoryAllocator/include/vk_mem_alloc.h"
 #include "external/volk/volk.h"
-#include "external/cglm/include/cglm/cglm.h"
 #include "external/logger-c/logger/logger.h"
 
 #include <stdbool.h>
@@ -31,8 +30,6 @@
 #define CLAMP(v, mn, mx) MIN(MAX(v, mn), mx)
 uint32_t round_up(uint32_t a, uint32_t b);
 uint64_t round_up_64(uint64_t a, uint64_t b);
-#define FLOW_ARRAY_COUNT(array)                                                                                        \
-    (sizeof(array) / (sizeof(array[0]) * (sizeof(array) != PTR_SIZE || sizeof(array[0]) <= PTR_SIZE)))
 
 #define VK_CHECK(x)                                                                                                    \
     do                                                                                                                 \

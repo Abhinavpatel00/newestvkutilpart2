@@ -7,14 +7,14 @@
 
 
 #define STB_IMAGE_IMPLEMENTATION
-
+#include "external/stb/stb_image.h"
 
 #define CGLTF_IMPLEMENTATION
 
 #include "external/cgltf/cgltf.h"
 
 #define CGLM_IMPLEMENTATION
-
+#define CGLM_ALL_UNALIGNED
 
 #include "external/cglm/include/cglm/cglm.h"
 #include "external/logger-c/logger/logger.c"

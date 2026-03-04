@@ -4,26 +4,31 @@
 #define CIMGUI_USE_GLFW
 #define CIMGUI_DEFINE_ENUMS_AND_STRUCTS
 #define CIMGUI_USE_VULKAN
-
+#define CGLM_ALL_UNALIGNED
+#include "external/cglm/include/cglm/cglm.h"
+#include "external/cglm/include/cglm/types.h"
 
 #include "vk_default.h"
 #ifdef Status
 #undef Status
 #endif
-
+#include "gpu_timer.h"
+#include "flow/flow.h"
 
 #include "tinytypes.h"
 
 #include "external/cimgui/cimgui.h"
 
 #include "external/cimgui/cimgui_impl.h"
-
+#define internal static
+#define global static
+#define local_persist static
 
 #include "helpers.h"
 #include "offset_allocator.h"
+
+#include "external/stb/stb_image.h"
 #include <stdint.h>
-#include "cachestuff.h"
-#include "flow/flow.h"
 // Fallback for older Vulkan headers without VK_KHR_shader_non_semantic_info
 #ifndef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_NON_SEMANTIC_INFO_FEATURES_KHR
 #define VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_NON_SEMANTIC_INFO_FEATURES_KHR 1000333000
@@ -44,6 +49,9 @@ typedef struct VkPhysicalDeviceShaderNonSemanticInfoFeaturesKHR
 #endif
 
 
+#define BINDLESS_TEXTURE_BINDING 0
+#define BINDLESS_SAMPLER_BINDING 1
+#define BINDLESS_STORAGE_IMAGE_BINDING 2
 #define MAX_MIPS 16
 #define MAX_SWAPCHAIN_IMAGES 8
 
@@ -58,6 +66,7 @@ typedef struct VkPhysicalDeviceShaderNonSemanticInfoFeaturesKHR
 #define MAX_BINDLESS_TRANSFORMS 65536
 
 
+typedef uint32_t TextureID;
 typedef struct
 {
     VkInstance instance;
@@ -151,8 +160,7 @@ typedef struct
     uint32_t          bindless_sampled_image_count;
     uint32_t          bindless_sampler_count;
     uint32_t          bindless_storage_image_count;
-
-
+    bool              enable_pipeline_stats;
 } RendererDesc;
 
 
@@ -175,22 +183,9 @@ typedef struct ALIGNAS(32) ImageState
 } ImageState;
 
 
-//
-// for each texture in pool
-// {
-//     if texture.requestedMip < texture.residentMip
-//         stream_in(texture)
-//
-//     if texture.requestedMip > texture.residentMip
-//         stream_out(texture)
-// }
-//
-
-
 typedef struct ALIGNAS(64) FlowSwapchain
 {
     //hot
-
     ImageState states[MAX_SWAPCHAIN_IMAGES];
     VkImage    images[MAX_SWAPCHAIN_IMAGES];
     uint32_t   current_image;
@@ -250,24 +245,6 @@ typedef struct Bindless
 } Bindless;
 
 
-#define MAX_DEFAULT_SAMPLERS 16
-
-typedef enum DefaultSamplerID
-{
-    SAMPLER_LINEAR_WRAP = 0,
-    SAMPLER_LINEAR_CLAMP,
-    SAMPLER_NEAREST_WRAP,
-    SAMPLER_NEAREST_CLAMP,
-    SAMPLER_LINEAR_WRAP_ANISO,
-    SAMPLER_SHADOW,
-    SAMPLER_COUNT
-} DefaultSamplerID;
-
-typedef struct DefaultSamplerTable
-{
-    VkSampler samplers[SAMPLER_COUNT];
-} DefaultSamplerTable;
-
 // ────────────────────────────────────────────────────────────────
 // Render Targets
 // ────────────────────────────────────────────────────────────────
@@ -279,33 +256,28 @@ typedef struct RenderTarget
 {
     VkImage       image;
     VmaAllocation allocation;
-    VkImageView   view;                    // full mip chain view (for sampling)
-    VkImageView   mip_views[RT_MAX_MIPS];  // per-mip views (for attachments)
 
-    VkFormat              format;
-    uint32_t              width;
-    uint32_t              height;
-    uint32_t              mip_count;
-    VkSampleCountFlagBits samples;  // 0 = VK_SAMPLE_COUNT_1_BIT
-    VkImageUsageFlags     usage;
-    VkImageAspectFlags    aspect;
+    VkImageView view;                    // full mip chain
+    VkImageView mip_views[RT_MAX_MIPS];  // per-mip views
 
-    // Per-mip sync state — reuses existing ImageState
+    VkFormat format;
+    uint32_t width;
+    uint32_t height;
+    uint32_t layers;
+    uint32_t mip_count;
+
+    VkImageUsageFlags  usage;
+    VkImageAspectFlags aspect;
+
     ImageState mip_states[RT_MAX_MIPS];
 
-    // Bindless integration
-    uint32_t sampled_id;  // bindless sampled image slot (UINT32_MAX if unused)
-    uint32_t storage_id;  // bindless storage image slot (UINT32_MAX if unused)
+    uint32_t bindless_index;  // shared index for sampled/storage
+
+    const char* debug_name;
+
 } RenderTarget;
 
 
-typedef struct RenderTargetPool
-{
-    RenderTarget targets[RT_POOL_MAX];
-    bool         in_use[RT_POOL_MAX];
-    uint32_t     unused_frames[RT_POOL_MAX];
-    uint32_t     count;
-} RenderTargetPool;
 typedef enum FrustumPlane
 {
     TopPlane,
@@ -326,6 +298,36 @@ typedef struct Frustum
 
 
 #define MAX_FRAMES_IN_FLIGHT 3
+//
+//  shader decides which sampler to use.
+//
+// This is actually powerful. You can do things like:
+//
+// same texture
+// different samplers
+//
+// Example:
+//
+// • albedo texture → linear filtering
+// • pixel-art texture → nearest filtering
+// • shadow map → comparison sampler
+typedef struct
+{
+    VkImage       image;
+    VkImageView   view;
+    VmaAllocation allocation;
+
+    // metadata
+    uint32_t width;
+    uint32_t height;
+    uint32_t mip_count;
+
+    VkFormat format;
+
+    bool valid;
+} Texture;
+
+
 typedef struct
 {
     InstanceContext  instance;
@@ -353,8 +355,6 @@ typedef struct
     uint32_t      current_frame;
 
 
-    // DescriptorLayoutCache descriptor_layout_cache;
-    // PipelineLayoutCache   pipeline_layout_cache;
     Bindless bindless_system;
 
     VkCommandPool one_time_gfx_pool;
@@ -365,10 +365,17 @@ typedef struct
     VkPipelineCache  pipeline_cache;
     Frustum          frustum;
     VkDescriptorPool imgui_pool;
-    RenderTarget     hdr_color;
-    RenderTarget     depth;
+    RenderTarget     depth[MAX_SWAPCHAIN_IMAGES];      // per-image depth
+    RenderTarget     hdr_color[MAX_SWAPCHAIN_IMAGES];  // optional HDR buffer
+
+    GpuProfiler gpuprofiler[MAX_FRAMES_IN_FLIGHT];
 
     flow_id_pool texture_pool;
+    flow_id_pool sampler_pool;
+    Texture      textures[MAX_BINDLESS_TEXTURES];  // reference by textureid
+    VkSampler    sampler[MAX_BINDLESS_SAMPLERS];   // reference by textureid
+    TextureID    dummy_texture;
+
     //  RenderTarget depth[MAX_SWAPCHAIN_IMAGES];
 } Renderer;
 
@@ -537,7 +544,7 @@ static inline GraphicsPipelineConfig pipeline_config_default(void)
 
     cfg.depth_test_enable  = true;
     cfg.depth_write_enable = true;
-    cfg.depth_compare_op   = VK_COMPARE_OP_GREATER;
+    cfg.depth_compare_op   = VK_COMPARE_OP_LESS;
 
     cfg.color_attachment_count = 0;
     cfg.color_formats          = NULL;
@@ -650,296 +657,6 @@ FORCE_INLINE bool vk_swapchain_present(VkQueue present_queue, FlowSwapchain* sc,
     return true;
 }
 
-typedef struct
-{
-    uint32_t handle;
-    uint32_t generation;
-} BufferHandle;
-typedef struct
-{
-    uint32_t handle;
-    uint32_t generation;
-} TextureHandle;
-
-//
-// typedef enum
-// {
-//     TEXTURE_STREAMING_IDLE,
-//     TEXTURE_STREAMING_IN,
-//     TEXTURE_STREAMING_OUT
-// } TextureStreamingState;
-//
-//
-// typedef enum
-// {
-//     TEXTURE_RESIDENCY_NONE,
-//     TEXTURE_RESIDENCY_PARTIAL,
-//     TEXTURE_RESIDENCY_FULL
-// } TextureResidency;
-//
-//
-// // ------------------------------------------------------------
-// // TEXTURE OBJECT
-// // ------------------------------------------------------------
-//
-// typedef struct
-// {
-//     VkImage       image;
-//     VmaAllocation allocation;
-//     VkImageView   view;
-//
-//     uint32_t width;
-//     uint32_t height;
-//     uint32_t mipCount;
-//
-//     uint32_t residentMip;
-//     uint32_t requestedMip;
-//
-//     TextureResidency      residency;
-//     TextureStreamingState streaming;
-//
-//
-//     ImageState state;
-//
-//     uint32_t generation;
-//
-// } Texture;
-//
-// // ------------------------------------------------------------
-// // POOL
-// // ------------------------------------------------------------
-//
-// typedef struct
-// {
-//     Texture textures[MAX_BINDLESS_TEXTURES];
-//
-//     uint32_t freeList[MAX_BINDLESS_TEXTURES];
-//     uint32_t freeCount;
-//
-// } TexturePool;
-//
-// typedef struct TextureStreamRequest
-// {
-//     TextureHandle handle;
-//     uint32_t      mip;
-// } TextureStreamRequest;
-//
-// static Texture* texture_get(TextureHandle handle, TexturePool* pool)
-// {
-//     Texture* tex = &pool->textures[handle.index];
-//
-//     if(tex->generation != handle.generation)
-//         return NULL;
-//
-//     return tex;
-// }
-//
-//
-// static TextureHandle texture_alloc_handle(TexturePool* pool)
-// {
-//     assert(pool->freeCount > 0);
-//
-//     uint32_t index = pool->freeList[--pool->freeCount];
-//
-//     Texture* tex = &pool->textures[index];
-//
-//     tex->generation++;
-//
-//     tex->residentMip  = UINT32_MAX;
-//     tex->requestedMip = UINT32_MAX;
-//
-//     tex->residency = TEXTURE_RESIDENCY_NONE;
-//     tex->streaming = TEXTURE_STREAMING_IDLE;
-//
-//     tex->state.validity = IMAGE_STATE_UNDEFINED;
-//
-//     TextureHandle h = {.index = index, .generation = tex->generation};
-//
-//     return h;
-// }
-//
-//
-// // ------------------------------------------------------------
-// // INIT
-// // ------------------------------------------------------------
-//
-//
-// void texture_system_init(TexturePool* pool)
-// {
-//     memset(pool, 0, sizeof(*pool));
-//
-//     pool->freeCount = MAX_BINDLESS_TEXTURES;
-//
-//     for(uint32_t i = 0; i < MAX_BINDLESS_TEXTURES; i++)
-//         pool->freeList[i] = i;
-// }
-// void texture_stream_in(TextureHandle handle,
-//                        uint32_t      mip,
-//                        VkBuffer      stagingBuffer,
-//                        VkDeviceSize  offset,
-//                        TexturePool*  pool,
-//                        VkDevice      device,
-//                        VkCommandPool transferpool,
-//                        VkQueue       transferqueue)
-// {
-//     Texture* tex = texture_get(handle, pool);
-//
-//     VkCommandBuffer cmd = begin_one_time_cmd(device, transferpool);
-//
-//
-//     cmd_transition_mip(cmd, tex->image, &tex->state, VK_IMAGE_ASPECT_COLOR_BIT, mip, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-//                        VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_QUEUE_FAMILY_IGNORED);
-//
-//     uint32_t w = tex->width >> mip;
-//     uint32_t h = tex->height >> mip;
-//
-//     if(w == 0)
-//         w = 1;
-//     if(h == 0)
-//         h = 1;
-//
-//
-//     VkBufferImageCopy copy = {
-//         .bufferOffset = offset,
-//
-//         .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = mip, .baseArrayLayer = 0, .layerCount = 1},
-//         .imageExtent = {w, h, 1}};
-//
-//     vkCmdCopyBufferToImage(cmd, stagingBuffer, tex->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
-//
-//     cmd_transition_mip(cmd, tex->image, &tex->state, VK_IMAGE_ASPECT_COLOR_BIT, mip, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-//                        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_QUEUE_FAMILY_IGNORED);
-//     end_one_time_cmd(device, transferqueue, transferpool, cmd);
-//
-//     tex->residentMip = mip;
-//
-//     if(mip == 0)
-//         tex->residency = TEXTURE_RESIDENCY_FULL;
-// }
-//
-//
-// // ------------------------------------------------------------
-// // UPDATE STREAMING
-// // ------------------------------------------------------------
-//
-// uint32_t texture_streaming_update(TexturePool* pool, TextureStreamRequest* requests, uint32_t maxRequests)
-// {
-//     uint32_t count = 0;
-//
-//     for(uint32_t i = 0; i < MAX_BINDLESS_TEXTURES; i++)
-//     {
-//         Texture* tex = &pool->textures[i];
-//
-//         if(tex->generation == 0)
-//             continue;
-//
-//         if(tex->requestedMip < tex->residentMip)
-//         {
-//             tex->streaming = TEXTURE_STREAMING_IN;
-//
-//             if(count < maxRequests)
-//             {
-//                 requests[count++] = (TextureStreamRequest){.handle = {i, tex->generation}, .mip = tex->residentMip - 1};
-//             }
-//         }
-//         else if(tex->requestedMip > tex->residentMip)
-//         {
-//             tex->streaming = TEXTURE_STREAMING_OUT;
-//         }
-//         else
-//         {
-//             tex->streaming = TEXTURE_STREAMING_IDLE;
-//         }
-//     }
-//
-//     return count;
-// }
-// void texture_destroy(TextureHandle handle, TexturePool* pool, Renderer* r)
-// {
-//     Texture* tex = texture_get(handle, pool);
-//
-//     if(!tex)
-//         return;
-//
-//     vkDestroyImageView(r->device, tex->view, NULL);
-//     vmaDestroyImage(r->vmaallocator, tex->image, tex->allocation);
-//     tex->generation++;  // ← CRITICAL
-//     pool->freeList[pool->freeCount++] = handle.index;
-//
-//
-//     VkDescriptorImageInfo info = {.imageView = VK_NULL_HANDLE, .imageLayout = VK_IMAGE_LAYOUT_UNDEFINED};
-//
-//     VkWriteDescriptorSet write = {.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-//                                   .dstSet          = r->bindless_system.set,
-//                                   .dstBinding      = 0,
-//                                   .dstArrayElement = handle.index,
-//                                   .descriptorCount = 1,
-//                                   .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-//                                   .pImageInfo      = &info};
-//
-//     vkUpdateDescriptorSets(r->device, 1, &write, 0, NULL);
-// }
-//
-// void texture_bind(TextureHandle handle, TexturePool* pool, Renderer* r)
-// {
-//     Texture* tex = texture_get(handle, pool);
-//
-//     VkDescriptorImageInfo info = {.imageView = tex->view, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-//
-//     VkWriteDescriptorSet write = {.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-//                                   .dstSet          = r->bindless_system.set,
-//                                   .dstBinding      = 0,
-//                                   .dstArrayElement = handle.index,
-//                                   .descriptorCount = 1,
-//                                   .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-//                                   .pImageInfo      = &info};
-//
-//     vkUpdateDescriptorSets(r->device, 1, &write, 0, NULL);
-// }
-//
-// TextureHandle texture_create(TexturePool* pool, Renderer* r, uint32_t width, uint32_t height, uint32_t mipCount, VkFormat format)
-// {
-//     TextureHandle handle = texture_alloc_handle(pool);
-//
-//     Texture* tex = texture_get(handle, pool);
-//
-//     tex->width    = width;
-//     tex->height   = height;
-//     tex->mipCount = mipCount;
-//
-//     tex->residentMip  = mipCount - 1;
-//     tex->requestedMip = mipCount - 1;
-//
-//     tex->residency = TEXTURE_RESIDENCY_PARTIAL;
-//
-//     VkImageCreateInfo imageInfo = {.sType       = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-//                                    .imageType   = VK_IMAGE_TYPE_2D,
-//                                    .format      = format,
-//                                    .extent      = {width, height, 1},
-//                                    .mipLevels   = mipCount,
-//                                    .arrayLayers = 1,
-//                                    .samples     = VK_SAMPLE_COUNT_1_BIT,
-//                                    .tiling      = VK_IMAGE_TILING_OPTIMAL,
-//                                    .usage       = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT};
-//
-//     VmaAllocationCreateInfo allocInfo = {.usage = VMA_MEMORY_USAGE_GPU_ONLY};
-//
-//     vmaCreateImage(r->vmaallocator, &imageInfo, &allocInfo, &tex->image, &tex->allocation, NULL);
-//
-//     VkImageViewCreateInfo viewInfo = {
-//         .sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-//         .image    = tex->image,
-//         .viewType = VK_IMAGE_VIEW_TYPE_2D,
-//         .format   = format,
-//         .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = mipCount, .layerCount = 1}};
-//
-//     vkCreateImageView(r->device, &viewInfo, NULL, &tex->view);
-//
-//     texture_bind(handle, pool, r);
-//
-//     return handle;
-// }
-//
 //Instance → GPU selection → Query capabilities → Enable features → Create logical device → Store result
 //
 // Wait for frame fence
@@ -949,17 +666,8 @@ typedef struct
 // Submit command buffer
 // Present swapchain image
 // Advance frame index
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
+
+
 FORCE_INLINE void imgui_shutdown(void)
 {
     ImGui_ImplVulkan_Shutdown();
@@ -973,3 +681,126 @@ FORCE_INLINE void imgui_begin_frame(void)
     ImGui_ImplGlfw_NewFrame();
     igNewFrame();
 }
+
+
+typedef struct
+{
+    vec3  position;
+    float yaw;    // radians
+    float pitch;  // radians
+    float move_speed;
+    float look_speed;
+    float fov_y;
+    float near_z;
+    float far_z;
+} Camera;
+
+static FORCE_INLINE void camera_build_proj_reverse_z_infinite(mat4 out_proj, Camera* cam, float aspect)
+{
+    float f = 1.0f / tanf(cam->fov_y * 0.5f);
+    float n = cam->near_z;
+
+    glm_mat4_zero(out_proj);
+
+    out_proj[0][0] = f / aspect;
+    out_proj[1][1] = f;
+
+    // Reverse-Z, infinite far
+    out_proj[2][2] = 0.0f;
+    out_proj[2][3] = -1.0f;
+
+    out_proj[3][2] = n;
+    out_proj[3][3] = 0.0f;
+}
+
+
+typedef struct Buffer
+{
+    VkBuffer        buffer;
+    VkDeviceSize    buffer_size;
+    VkDeviceAddress address;
+    uint8_t*        mapping;
+    VmaAllocation   allocation;
+} Buffer;
+
+bool create_buffer(Renderer* r, VkDeviceSize size, VkBufferUsageFlags usage, VmaMemoryUsage memory_usage, Buffer* out);
+
+void destroy_buffer(Renderer* r, Buffer* b);
+
+
+typedef struct
+{
+    uint32_t          width;
+    uint32_t          height;
+    uint32_t          mip_count;
+    VkFormat          format;
+    VkImageUsageFlags usage;
+    const char*       debug_name;
+} TextureCreateDesc;
+
+TextureID create_texture(Renderer* r, const TextureCreateDesc* desc);
+void      destroy_texture(Renderer* r, TextureID id);
+
+TextureID load_texture(Renderer* r, const char* path);
+
+typedef uint32_t SamplerID;
+
+typedef struct
+{
+    VkFilter mag_filter;
+    VkFilter min_filter;
+
+    VkSamplerAddressMode address_u;
+    VkSamplerAddressMode address_v;
+    VkSamplerAddressMode address_w;
+
+    VkSamplerMipmapMode mipmap_mode;
+
+    float max_lod;
+
+    const char* debug_name;
+
+} SamplerCreateDesc;
+
+SamplerID create_sampler(Renderer* r, const SamplerCreateDesc* desc);
+void      destroy_sampler(Renderer* r, SamplerID id);
+
+
+FLOW_INLINE void rt_transition_mip(VkCommandBuffer cmd, RenderTarget* rt, uint32_t mip, VkPipelineStageFlags2 new_stage, VkAccessFlags2 new_access, VkImageLayout new_layout)
+{
+    assert(mip < rt->mip_count);
+    cmd_transition_mip(cmd, rt->image, &rt->mip_states[mip], rt->aspect, mip, new_stage, new_access, new_layout, VK_QUEUE_FAMILY_IGNORED);
+}
+
+FLOW_INLINE void rt_transition_all(VkCommandBuffer cmd, RenderTarget* rt, VkPipelineStageFlags2 new_stage, VkAccessFlags2 new_access, VkImageLayout new_layout)
+{
+    for(uint32_t mip = 0; mip < rt->mip_count; mip++)
+    {
+        ImageState* s = &rt->mip_states[mip];
+        // Skip if already in target state
+        if(s->validity == IMAGE_STATE_VALID && s->stage == new_stage && s->access == new_access && s->layout == new_layout)
+        {
+            continue;
+        }
+        cmd_transition_mip(cmd, rt->image, s, rt->aspect, mip, new_stage, new_access, new_layout, VK_QUEUE_FAMILY_IGNORED);
+    }
+}
+
+
+typedef uint32_t RenderTargetID;
+typedef struct RenderTargetSpec
+{
+    uint32_t           width;
+    uint32_t           height;
+    uint32_t           layers;
+    VkFormat           format;
+    VkImageUsageFlags  usage;
+    VkImageAspectFlags aspect;     // 0 = infer from format
+    uint32_t           mip_count;  // 0 = auto-compute, 1 = no mips
+    const char*        debug_name;
+} RenderTargetSpec;
+
+
+bool rt_create(Renderer* r, RenderTarget* rt, const RenderTargetSpec* spec);
+bool rt_resize(Renderer* r, RenderTarget* rt, uint32_t width, uint32_t height);
+void rt_destroy(Renderer* r, RenderTarget* rt);

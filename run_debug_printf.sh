@@ -12,7 +12,7 @@ rm -f compiledshaders/triangle.vert.spv compiledshaders/triangle.frag.spv
 SLANG_DEFINES="-DDEBUG_PRINTF=1" ./compileslang.sh
 
 # Build app
-./nob
+make release
 export VK_LAYER_PRINTF_BUFFER_SIZE=525312 
 # Run with Debug Printf enabled in validation layers
 export VK_LAYER_PRINTF_ONLY_PRESET=1
