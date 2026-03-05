@@ -136,7 +136,6 @@ int main()
                               .address_u = VK_SAMPLER_ADDRESS_MODE_REPEAT,
                               .address_v = VK_SAMPLER_ADDRESS_MODE_REPEAT,
                               .address_w = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-
                               .mipmap_mode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
                               .max_lod     = 1.0f};
 

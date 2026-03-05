@@ -865,7 +865,6 @@ static FLOW_INLINE void frame_start(Renderer* renderer, Camera* cam)
     renderer->swapchain.needs_recreate |=
         fb_w != (int)renderer->swapchain.extent.width || fb_h != (int)renderer->swapchain.extent.height;
 
-    static double lastX = 0.0, lastY = 0.0;
 
     if(glfwGetMouseButton(renderer->window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS)
     {
@@ -895,17 +894,17 @@ static FLOW_INLINE void frame_start(Renderer* renderer, Camera* cam)
 
         if(cam->first_mouse)
         {
-            lastX            = xpos;
-            lastY            = ypos;
-            cam->first_mouse = false;
+
+            cam->last_mouse_x = xpos;
+            cam->last_mouse_y = ypos;
+            cam->first_mouse  = false;
         }
 
-        float dx = (float)(xpos - lastX);
-        float dy = (float)(ypos - lastY);
+        float dx = (float)(xpos - cam->last_mouse_x);
+        float dy = (float)(ypos - cam->last_mouse_y);
 
-        lastX = xpos;
-        lastY = ypos;
-
+        cam->last_mouse_x = xpos;
+        cam->last_mouse_y = ypos;
         cam->yaw += dx * cam->look_speed;
         cam->pitch -= dy * cam->look_speed;
 
