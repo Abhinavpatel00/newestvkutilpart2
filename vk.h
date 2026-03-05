@@ -1,4 +1,6 @@
 #pragma once
+#include <bits/time.h>
+#include <time.h>
 #define IMGUI_IMPL_VULKAN_MINIMUM_IMAGE_SAMPLER_POOL_SIZE (1)
 #define IMGUI_IMPL_VULKAN_USE_VOLK
 #define CIMGUI_USE_GLFW
@@ -329,7 +331,25 @@ typedef struct
 
 
 typedef struct
+
+
 {
+    FlowSwapchain swapchain;
+    GLFWwindow*   window;
+    FrameContext  frames[MAX_FRAMES_IN_FLIGHT];
+    uint32_t      current_frame;
+
+
+    Frustum          frustum;
+    VkDescriptorPool imgui_pool;
+    RenderTarget     depth[MAX_SWAPCHAIN_IMAGES];      // per-image depth
+    RenderTarget     hdr_color[MAX_SWAPCHAIN_IMAGES];  // optional HDR buffer
+    float            dt;
+    double           cpu_frame_ns;
+    double           cpu_prev_frame;
+    GpuProfiler      gpuprofiler[MAX_FRAMES_IN_FLIGHT];
+
+
     InstanceContext  instance;
     VkPhysicalDevice physical_device;
     //warm data
@@ -348,12 +368,7 @@ typedef struct
     VkAllocationCallbacks* allocatorcallbacks;
     VmaAllocator           vmaallocator;
 
-    VkSurfaceKHR  surface;
-    FlowSwapchain swapchain;
-    GLFWwindow*   window;
-    FrameContext  frames[MAX_FRAMES_IN_FLIGHT];
-    uint32_t      current_frame;
-
+    VkSurfaceKHR surface;
 
     Bindless bindless_system;
 
@@ -362,21 +377,12 @@ typedef struct
 
     DeviceInfo info;
 
-    VkPipelineCache  pipeline_cache;
-    Frustum          frustum;
-    VkDescriptorPool imgui_pool;
-    RenderTarget     depth[MAX_SWAPCHAIN_IMAGES];      // per-image depth
-    RenderTarget     hdr_color[MAX_SWAPCHAIN_IMAGES];  // optional HDR buffer
-
-    GpuProfiler gpuprofiler[MAX_FRAMES_IN_FLIGHT];
-
-    flow_id_pool texture_pool;
-    flow_id_pool sampler_pool;
-    Texture      textures[MAX_BINDLESS_TEXTURES];  // reference by textureid
-    VkSampler    sampler[MAX_BINDLESS_SAMPLERS];   // reference by textureid
-    TextureID    dummy_texture;
-
-    //  RenderTarget depth[MAX_SWAPCHAIN_IMAGES];
+    VkPipelineCache pipeline_cache;
+    flow_id_pool    texture_pool;
+    flow_id_pool    sampler_pool;
+    Texture         textures[MAX_BINDLESS_TEXTURES];  // reference by textureid
+    VkSampler       sampler[MAX_BINDLESS_SAMPLERS];   // reference by textureid
+    TextureID       dummy_texture;
 } Renderer;
 
 typedef struct BufferPool
@@ -544,7 +550,7 @@ static inline GraphicsPipelineConfig pipeline_config_default(void)
 
     cfg.depth_test_enable  = true;
     cfg.depth_write_enable = true;
-    cfg.depth_compare_op   = VK_COMPARE_OP_LESS;
+    cfg.depth_compare_op   = VK_COMPARE_OP_GREATER;
 
     cfg.color_attachment_count = 0;
     cfg.color_formats          = NULL;
@@ -693,6 +699,13 @@ typedef struct
     float fov_y;
     float near_z;
     float far_z;
+    mat4  view_proj;
+    bool  mouse_captured;
+    bool  first_mouse;
+
+    double last_mouse_x;
+    double last_mouse_y;
+
 } Camera;
 
 static FORCE_INLINE void camera_build_proj_reverse_z_infinite(mat4 out_proj, Camera* cam, float aspect)
@@ -804,3 +817,241 @@ typedef struct RenderTargetSpec
 bool rt_create(Renderer* r, RenderTarget* rt, const RenderTargetSpec* spec);
 bool rt_resize(Renderer* r, RenderTarget* rt, uint32_t width, uint32_t height);
 void rt_destroy(Renderer* r, RenderTarget* rt);
+
+
+static inline uint64_t time_now_ns()
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+}
+#define RUN_ONCE for(static int _once = 1; _once; _once = 0)
+
+#define PUSH_CONSTANT(name, BODY)                                                                                      \
+    typedef struct ALIGNAS(16) name_init                                                                               \
+    {                                                                                                                  \
+        BODY                                                                                                           \
+    } name_init;                                                                                                       \
+    enum                                                                                                               \
+    {                                                                                                                  \
+        name##_pad_size = 256 - sizeof(name_init)                                                                      \
+    };                                                                                                                 \
+                                                                                                                       \
+    typedef struct ALIGNAS(16) name                                                                                    \
+    {                                                                                                                  \
+        BODY uint8_t _pad[name##_pad_size];                                                                            \
+    } name;                                                                                                            \
+                                                                                                                       \
+    _Static_assert(sizeof(name) == 256, "Push constant != 256");
+
+
+static FLOW_INLINE void frame_start(Renderer* renderer, Camera* cam)
+{
+    uint64_t now = time_now_ns();
+
+    renderer->cpu_frame_ns   = now - renderer->cpu_prev_frame;
+    renderer->cpu_prev_frame = now;
+
+
+    renderer->dt = (float)renderer->cpu_frame_ns * 1e-9f;
+
+    float dt = renderer->dt;
+    glfwPollEvents();
+
+
+    int fb_w, fb_h;
+    glfwGetFramebufferSize(renderer->window, &fb_w, &fb_h);
+
+    renderer->swapchain.needs_recreate |=
+        fb_w != (int)renderer->swapchain.extent.width || fb_h != (int)renderer->swapchain.extent.height;
+
+    static double lastX = 0.0, lastY = 0.0;
+
+    if(glfwGetMouseButton(renderer->window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS)
+    {
+        if(!cam->mouse_captured)
+        {
+            glfwSetInputMode(renderer->window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+            cam->mouse_captured = true;
+            glfwGetCursorPos(renderer->window, &cam->last_mouse_x, &cam->last_mouse_y);
+        }
+    }
+    else
+    {
+        if(cam->mouse_captured)
+        {
+            glfwSetInputMode(renderer->window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            cam->mouse_captured = false;
+        }
+    }
+
+    /* ---------------- camera ---------------- */
+
+    if(cam->mouse_captured)
+    {
+
+        double xpos, ypos;
+        glfwGetCursorPos(renderer->window, &xpos, &ypos);
+
+        if(cam->first_mouse)
+        {
+            lastX            = xpos;
+            lastY            = ypos;
+            cam->first_mouse = false;
+        }
+
+        float dx = (float)(xpos - lastX);
+        float dy = (float)(ypos - lastY);
+
+        lastX = xpos;
+        lastY = ypos;
+
+        cam->yaw += dx * cam->look_speed;
+        cam->pitch -= dy * cam->look_speed;
+
+        float limit = glm_rad(89.0f);
+        cam->pitch  = glm_clamp(cam->pitch, -limit, limit);
+    }
+
+    vec3 forward = {
+        cosf(cam->pitch) * sinf(cam->yaw),
+        sinf(cam->pitch),
+        -cosf(cam->pitch) * cosf(cam->yaw),
+    };
+    glm_vec3_normalize(forward);
+
+    vec3 world_up = {0, 1, 0};
+    vec3 right = {0}, up = {0};
+
+    glm_vec3_cross(forward, world_up, right);
+    glm_vec3_normalize(right);
+    glm_vec3_cross(right, forward, up);
+
+    float speed = cam->move_speed;
+
+    if(glfwGetKey(renderer->window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
+        speed *= 3.0f;
+
+    vec3 delta = {0};
+
+    if(glfwGetKey(renderer->window, GLFW_KEY_W) == GLFW_PRESS)
+        glm_vec3_muladds(forward, speed * dt, delta);
+    if(glfwGetKey(renderer->window, GLFW_KEY_S) == GLFW_PRESS)
+        glm_vec3_muladds(forward, -speed * dt, delta);
+    if(glfwGetKey(renderer->window, GLFW_KEY_D) == GLFW_PRESS)
+        glm_vec3_muladds(right, speed * dt, delta);
+    if(glfwGetKey(renderer->window, GLFW_KEY_A) == GLFW_PRESS)
+        glm_vec3_muladds(right, -speed * dt, delta);
+    if(glfwGetKey(renderer->window, GLFW_KEY_E) == GLFW_PRESS)
+        glm_vec3_muladds(world_up, speed * dt, delta);
+    if(glfwGetKey(renderer->window, GLFW_KEY_Q) == GLFW_PRESS)
+        glm_vec3_muladds(world_up, -speed * dt, delta);
+
+    glm_vec3_add(cam->position, delta, cam->position);
+
+    vec3 center;
+    glm_vec3_add(cam->position, forward, center);
+
+    mat4 view = GLM_MAT4_IDENTITY_INIT;
+    mat4 proj = GLM_MAT4_IDENTITY_INIT;
+
+    glm_lookat(cam->position, center, up, view);
+
+    float aspect = (float)renderer->swapchain.extent.width / (float)renderer->swapchain.extent.height;
+
+    camera_build_proj_reverse_z_infinite(proj, cam, aspect);
+
+    proj[1][1] *= -1.0f;
+
+    glm_mat4_mul(proj, view, cam->view_proj);
+
+    /* ---------------- frustum ---------------- */
+
+    mat4 m;
+    glm_mat4_copy(cam->view_proj, m);
+
+    renderer->frustum.planes[LeftPlane][0] = m[0][3] + m[0][0];
+    renderer->frustum.planes[LeftPlane][1] = m[1][3] + m[1][0];
+    renderer->frustum.planes[LeftPlane][2] = m[2][3] + m[2][0];
+    renderer->frustum.planes[LeftPlane][3] = m[3][3] + m[3][0];
+
+    renderer->frustum.planes[RightPlane][0] = m[0][3] - m[0][0];
+    renderer->frustum.planes[RightPlane][1] = m[1][3] - m[1][0];
+    renderer->frustum.planes[RightPlane][2] = m[2][3] - m[2][0];
+    renderer->frustum.planes[RightPlane][3] = m[3][3] - m[3][0];
+
+    renderer->frustum.planes[BottomPlane][0] = m[0][3] + m[0][1];
+    renderer->frustum.planes[BottomPlane][1] = m[1][3] + m[1][1];
+    renderer->frustum.planes[BottomPlane][2] = m[2][3] + m[2][1];
+    renderer->frustum.planes[BottomPlane][3] = m[3][3] + m[3][1];
+
+    renderer->frustum.planes[TopPlane][0] = m[0][3] - m[0][1];
+    renderer->frustum.planes[TopPlane][1] = m[1][3] - m[1][1];
+    renderer->frustum.planes[TopPlane][2] = m[2][3] - m[2][1];
+    renderer->frustum.planes[TopPlane][3] = m[3][3] - m[3][1];
+
+    renderer->frustum.planes[NearPlane][0] = m[0][3] + m[0][2];
+    renderer->frustum.planes[NearPlane][1] = m[1][3] + m[1][2];
+    renderer->frustum.planes[NearPlane][2] = m[2][3] + m[2][2];
+    renderer->frustum.planes[NearPlane][3] = m[3][3] + m[3][2];
+
+    renderer->frustum.planes[FarPlane][0] = m[0][3] - m[0][2];
+    renderer->frustum.planes[FarPlane][1] = m[1][3] - m[1][2];
+    renderer->frustum.planes[FarPlane][2] = m[2][3] - m[2][2];
+    renderer->frustum.planes[FarPlane][3] = m[3][3] - m[3][2];
+
+    forEach(i, FrustumPlaneCount)
+    {
+        vec4* p = &renderer->frustum.planes[i];
+
+        float len = sqrtf((*p)[0] * (*p)[0] + (*p)[1] * (*p)[1] + (*p)[2] * (*p)[2]);
+
+        float inv = 1.0f / len;
+
+        (*p)[0] *= inv;
+        (*p)[1] *= inv;
+        (*p)[2] *= inv;
+        (*p)[3] *= inv;
+    }
+
+    /* ----------- window minimized ----------- */
+
+    if(fb_w == 0 || fb_h == 0)
+    {
+        glfwWaitEvents();
+        return;
+    }
+
+    if(renderer->swapchain.needs_recreate)
+    {
+        vkDeviceWaitIdle(renderer->device);
+
+        vk_swapchain_recreate(renderer->device, renderer->physical_device, &renderer->swapchain, fb_w, fb_h,
+                              renderer->graphics_queue, renderer->one_time_gfx_pool);
+
+        forEach(i, renderer->swapchain.image_count)
+        {
+
+            rt_resize(renderer, &renderer->depth[i], fb_w, fb_h);
+            rt_resize(renderer, &renderer->hdr_color[i], fb_w, fb_h);
+        }
+
+
+        renderer->swapchain.needs_recreate = false;
+    }
+
+    /* -------- frame sync -------- */
+
+    vkWaitForFences(renderer->device, 1, &renderer->frames[renderer->current_frame].in_flight_fence, VK_TRUE, UINT64_MAX);
+
+    vkResetFences(renderer->device, 1, &renderer->frames[renderer->current_frame].in_flight_fence);
+
+    GpuProfiler* frame_prof = &renderer->gpuprofiler[renderer->current_frame];
+
+    gpu_profiler_collect(frame_prof, renderer->device);
+
+    vkResetCommandPool(renderer->device, renderer->frames[renderer->current_frame].cmdbufpool, 0);
+
+    vk_swapchain_acquire(renderer->device, &renderer->swapchain,
+                         renderer->frames[renderer->current_frame].image_available_semaphore, VK_NULL_HANDLE, UINT64_MAX);
+}
