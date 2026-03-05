@@ -20,7 +20,7 @@ typedef struct
     float pos[3];
     float uv[2];
 } Vertex;
-
+// we can get texture id in specific range so that it can be encoded in bitfield using flow id in range
 // whatare these GPU uniform block
 // Cluster grid
 // Culling results buffer
