@@ -151,7 +151,7 @@ typedef struct
     VkDebugUtilsMessageTypeFlagsEXT     validation_types;
     bool                                use_custom_features;
     VkFeatureChain                      custom_features;
-    VkPresentModeKHR                    swapchain_preferred_presest_mode;
+    VkPresentModeKHR                    swapchain_preferred_present_mode;
     VkFormat                            swapchain_preferred_format;
 
     VkColorSpaceKHR swapchain_preferred_color_space;

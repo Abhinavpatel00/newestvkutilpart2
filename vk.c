@@ -1134,10 +1134,10 @@ void renderer_create(Renderer* r, RendererDesc* desc)
                                    .extra_usage           = desc->swapchain_extra_usage_flags,
                                    .old_swapchain         = VK_NULL_HANDLE};
 
-    if(desc->swapchain_preferred_presest_mode)
+    if(desc->swapchain_preferred_present_mode)
     {
 
-        sci.preferred_present_mode = desc->swapchain_preferred_presest_mode;
+        sci.preferred_present_mode = desc->swapchain_preferred_present_mode;
     }
     else
     {
@@ -1544,9 +1544,6 @@ void vk_create_swapchain(VkDevice                       device,
     // Query formats and present modes up-front to satisfy validation and pick supported values.
     VkSurfaceFormatKHR surface_format =
         select_surface_format(gpu, info->surface, info->preferred_format, info->preferred_color_space);
-    VkPresentModeKHR present_mode = vk_swapchain_select_present_mode(gpu, info->surface, false);
-    if(info->preferred_present_mode != VK_PRESENT_MODE_MAX_ENUM_KHR)
-        present_mode = info->preferred_present_mode;
 
     VkExtent2D extent = choose_extent(&caps.surfaceCapabilities, info->width, info->height);
 
@@ -1566,7 +1563,7 @@ void vk_create_swapchain(VkDevice                       device,
                                    .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
                                    .preTransform     = caps.surfaceCapabilities.currentTransform,
                                    .compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-                                   .presentMode      = present_mode,
+                                   .presentMode      = info->preferred_present_mode,
                                    .clipped          = VK_TRUE,
                                    .oldSwapchain     = info->old_swapchain};
 
@@ -1579,7 +1576,7 @@ void vk_create_swapchain(VkDevice                       device,
     out_swapchain->extent        = extent;
     out_swapchain->format        = surface_format.format;
     out_swapchain->color_space   = surface_format.colorSpace;
-    out_swapchain->present_mode  = present_mode;
+    out_swapchain->present_mode  = info->preferred_present_mode;
     out_swapchain->current_image = 0;
     out_swapchain->image_usage   = usage;
     // Query swapchain images

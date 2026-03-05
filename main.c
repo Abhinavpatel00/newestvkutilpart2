@@ -91,18 +91,21 @@ int main()
                                    | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
             .validation_types = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT
                                 | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
-            .width                           = 1362,
-            .height                          = 749,
+            .width  = 1362,
+            .height = 749,
+
             .swapchain_preferred_color_space = VK_COLORSPACE_SRGB_NONLINEAR_KHR,
             .swapchain_preferred_format      = VK_FORMAT_B8G8R8A8_UNORM,
             .swapchain_extra_usage_flags     = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
             .vsync                           = false,
             .enable_debug_printf             = false,  // Enable shader debug printf
 
-            .bindless_sampled_image_count = 65536,
-            .bindless_sampler_count       = 256,
-            .bindless_storage_image_count = 16384,
-            .enable_pipeline_stats        = true,
+            .bindless_sampled_image_count     = 65536,
+            .bindless_sampler_count           = 256,
+            .bindless_storage_image_count     = 16384,
+            .enable_pipeline_stats            = false,
+            .swapchain_preferred_present_mode = VK_PRESENT_MODE_IMMEDIATE_KHR,
+
         };
 
 
@@ -326,9 +329,10 @@ int main()
         }
         gpu_profiler_begin_frame(frame_prof, cmd);
 
-        GPU_SCOPE(frame_prof, cmd, "Main Pass", VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT)
         {
             vkCmdBeginRendering(cmd, &rendering);
+
+            GPU_SCOPE(frame_prof, cmd, "Main Pass", VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT)
             {
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, render_pipelines.pipelines[TRIANGLE_PIPELINE]);
 
@@ -360,7 +364,7 @@ int main()
         }
 
         image_transition_swapchain(renderer.frames[renderer.current_frame].cmdbuf, &renderer.swapchain,
-                                   VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0);
+                                   VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, 0);
         vk_cmd_end(renderer.frames[renderer.current_frame].cmdbuf);
 
 
