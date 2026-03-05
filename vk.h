@@ -346,6 +346,9 @@ typedef struct
     RenderTarget     hdr_color[MAX_SWAPCHAIN_IMAGES];  // optional HDR buffer
     float            dt;
     double           cpu_frame_ns;
+    double           cpu_active_ns;
+    double           cpu_wait_ns;
+    double           cpu_wait_accum_ns;
     double           cpu_prev_frame;
     GpuProfiler      gpuprofiler[MAX_FRAMES_IN_FLIGHT];
 
@@ -852,6 +855,11 @@ static FLOW_INLINE void frame_start(Renderer* renderer, Camera* cam)
     uint64_t now            = time_now_ns();
 
     renderer->cpu_frame_ns   = now - renderer->cpu_prev_frame;
+    renderer->cpu_wait_ns    = renderer->cpu_wait_accum_ns;
+    renderer->cpu_active_ns  = renderer->cpu_frame_ns - renderer->cpu_wait_ns;
+    if(renderer->cpu_active_ns < 0.0)
+        renderer->cpu_active_ns = 0.0;
+    renderer->cpu_wait_accum_ns = 0.0;
     renderer->cpu_prev_frame = now;
 
 
@@ -1019,13 +1027,17 @@ static FLOW_INLINE void frame_start(Renderer* renderer, Camera* cam)
 
     if(fb_w == 0 || fb_h == 0)
     {
+        uint64_t wait_start = time_now_ns();
         glfwWaitEvents();
+        renderer->cpu_wait_accum_ns += (double)(time_now_ns() - wait_start);
         return;
     }
 
     if(renderer->swapchain.needs_recreate)
     {
+        uint64_t wait_start = time_now_ns();
         vkDeviceWaitIdle(renderer->device);
+        renderer->cpu_wait_accum_ns += (double)(time_now_ns() - wait_start);
 
         vk_swapchain_recreate(renderer->device, renderer->physical_device, &renderer->swapchain, fb_w, fb_h,
                               renderer->graphics_queue, renderer->one_time_gfx_pool);
@@ -1042,18 +1054,24 @@ static FLOW_INLINE void frame_start(Renderer* renderer, Camera* cam)
 
     /* -------- frame sync -------- */
 
+    uint64_t wait_start = time_now_ns();
     vkWaitForFences(renderer->device, 1, &renderer->frames[renderer->current_frame].in_flight_fence, VK_TRUE, UINT64_MAX);
+    renderer->cpu_wait_accum_ns += (double)(time_now_ns() - wait_start);
 
     vkResetFences(renderer->device, 1, &renderer->frames[renderer->current_frame].in_flight_fence);
 
     GpuProfiler* frame_prof = &renderer->gpuprofiler[renderer->current_frame];
 
+    wait_start = time_now_ns();
     gpu_profiler_collect(frame_prof, renderer->device);
+    renderer->cpu_wait_accum_ns += (double)(time_now_ns() - wait_start);
 
     vkResetCommandPool(renderer->device, renderer->frames[renderer->current_frame].cmdbufpool, 0);
 
+    wait_start = time_now_ns();
     vk_swapchain_acquire(renderer->device, &renderer->swapchain,
                          renderer->frames[renderer->current_frame].image_available_semaphore, VK_NULL_HANDLE, UINT64_MAX);
+    renderer->cpu_wait_accum_ns += (double)(time_now_ns() - wait_start);
 }
 
 
@@ -1082,5 +1100,7 @@ static FLOW_INLINE void submit_frame(Renderer* r)
 
     VK_CHECK(vkQueueSubmit2(r->graphics_queue, 1, &submit, f->in_flight_fence));
 
+    uint64_t wait_start = time_now_ns();
     vk_swapchain_present(r->present_queue, &r->swapchain, &r->swapchain.render_finished[r->swapchain.current_image], 1);
+    r->cpu_wait_accum_ns += (double)(time_now_ns() - wait_start);
 }

@@ -5,7 +5,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <vulkan/vulkan_core.h>
-//   https://github.com/ericherman/libfastset/tree/master/src
 #include "external/SPIRV-Reflect/spirv_reflect.h"
 
 
@@ -1115,6 +1114,11 @@ void renderer_create(Renderer* r, RendererDesc* desc)
     log_info("[renderer] frame contexts created");
 
     r->current_frame = 0;
+    r->cpu_prev_frame = (double)time_now_ns();
+    r->cpu_frame_ns = 0.0;
+    r->cpu_active_ns = 0.0;
+    r->cpu_wait_ns = 0.0;
+    r->cpu_wait_accum_ns = 0.0;
 
     log_info("[renderer] initialization complete");
 

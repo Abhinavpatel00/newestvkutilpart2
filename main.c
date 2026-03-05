@@ -57,8 +57,13 @@ typedef struct RenderPipelines
 // Entity = ID
 // Component = data
 // System = logic
-
-#define VALIDATION false
+static float noise2d(int x, int z)
+{
+    uint32_t n = x * 73856093 ^ z * 19349663;
+    n          = (n << 13) ^ n;
+    return 1.0f - ((n * (n * n * 15731 + 789221) + 1376312589) & 0x7fffffff) / 1073741824.0f;
+}
+#define VALIDATION false 
 int main()
 {
     VK_CHECK(volkInitialize());
@@ -128,9 +133,7 @@ int main()
                      VMA_MEMORY_USAGE_AUTO,
                      VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT, 2048);
 
-
-    PUSH_CONSTANT(Push, VkDeviceAddress vertex_ptr; float aspect; uint32_t _pad0; float view_proj[4][4];
-                  uint32_t texture_id; uint32_t sampler_id;);
+    VkBufferDeviceAddressInfo addrInfo = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = pool.buffer};
     TextureID tex_id = load_texture(&renderer, "/home/lk/myprojects/flowgame/data/PNG/Tiles/brick_red.png");
 
     SamplerCreateDesc desc = {.mag_filter = VK_FILTER_LINEAR,
@@ -144,7 +147,6 @@ int main()
 
     SamplerID linear_sampler = create_sampler(&renderer, &desc);
 
-    /* allocate buffers */
 
     BufferSlice vertex_slice   = buffer_pool_alloc(&pool, sizeof(Vertex) * 36, 16);
     BufferSlice indirect_slice = buffer_pool_alloc(&pool, sizeof(VkDrawIndirectCommand), 16);
@@ -218,15 +220,11 @@ int main()
 
     /* device address */
 
-    VkBufferDeviceAddressInfo addrInfo = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = pool.buffer};
-
-    VkDeviceAddress gpu_address = vkGetBufferDeviceAddress(renderer.device, &addrInfo) + vertex_slice.offset;
-
 
     Camera cam = {
-        .position   = {0.0f, 0.0f, 3.0f},
-        .yaw        = 0.0f,
-        .pitch      = 0.0f,
+        .position   = {16.0f, 12.0f, -20.0f},
+        .yaw        = glm_rad(180.0f),
+        .pitch      = glm_rad(-15.0f),
         .move_speed = 3.0f,
         .look_speed = 0.0025f,
         .fov_y      = glm_rad(75.0f),
@@ -238,6 +236,47 @@ int main()
 
     glfwSetInputMode(renderer.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
+    typedef struct
+    {
+        float x, y, z, w;
+    } Voxel;
+
+#define GRID_X 32
+#define GRID_Y 16
+#define GRID_Z 32
+
+    Voxel    voxels[GRID_X * GRID_Y * GRID_Z];
+    uint32_t voxel_count = 0;
+
+    for(int z = 0; z < GRID_Z; z++)
+    {
+        for(int y = 0; y < GRID_Y; y++)
+        {
+            for(int x = 0; x < GRID_X; x++)
+            {
+                voxels[voxel_count++] = (Voxel){(float)x, (float)y, (float)z, 0.0f};
+            }
+        }
+    }
+
+
+    BufferSlice voxel_slice       = buffer_pool_alloc(&pool, sizeof(Voxel) * voxel_count, 16);
+    cpu_indirect[0].instanceCount = voxel_count;
+    Voxel* cpu_voxels             = (Voxel*)voxel_slice.mapped;
+    memcpy(cpu_voxels, voxels, sizeof(Voxel) * voxel_count);
+
+    vmaFlushAllocation(renderer.vmaallocator, pool.allocation, indirect_slice.offset, sizeof(VkDrawIndirectCommand));
+    vmaFlushAllocation(renderer.vmaallocator, pool.allocation, voxel_slice.offset, sizeof(Voxel) * voxel_count);
+
+    VkDeviceAddress voxel_ptr = vkGetBufferDeviceAddress(renderer.device, &addrInfo) + voxel_slice.offset;
+
+    VkDeviceAddress vertex_address = vkGetBufferDeviceAddress(renderer.device, &addrInfo) + vertex_slice.offset;
+
+    /* view_proj needs 16-byte alignment (std430 rule for float4x4).
+       Offsets: vertex_ptr=0(8), voxel_ptr=8(8), aspect=16(4), voxel_count=20(4),
+       _pad=24(8), view_proj=32(64), texture_id=96(4), sampler_id=100(4) */
+    PUSH_CONSTANT(Push, VkDeviceAddress vertex_ptr; VkDeviceAddress voxel_ptr; float aspect; uint32_t voxel_count;
+                  uint32_t _align_pad[2]; float view_proj[4][4]; uint32_t texture_id; uint32_t sampler_id;);
     while(!glfwWindowShouldClose(renderer.window))
     {
 
@@ -292,9 +331,13 @@ int main()
             igBegin("Renderer Debug", NULL, 0);
 
             double cpu_frame_ms = renderer.cpu_frame_ns / 1000000.0;
+            double cpu_active_ms = renderer.cpu_active_ns / 1000000.0;
+            double cpu_wait_ms = renderer.cpu_wait_ns / 1000000.0;
 
-            igText("CPU frame: %.3f ms", cpu_frame_ms);
-            igText("FPS: %.1f", 1000.0 / cpu_frame_ms);
+            igText("CPU frame (wall): %.3f ms", cpu_frame_ms);
+            igText("CPU active: %.3f ms", cpu_active_ms);
+            igText("CPU wait: %.3f ms", cpu_wait_ms);
+            igText("FPS: %.1f", cpu_frame_ms > 0.0 ? 1000.0 / cpu_frame_ms : 0.0);
             igSeparator();
 
             igText("Camera Position");
@@ -340,12 +383,13 @@ int main()
 
                 Push push = {0};
 
-                push.vertex_ptr = gpu_address;
+                push.vertex_ptr = vertex_address;
                 push.aspect     = (float)renderer.swapchain.extent.width / (float)renderer.swapchain.extent.height;
 
-                push.texture_id = tex_id;
-                push.sampler_id = linear_sampler;
-
+                push.texture_id  = tex_id;
+                push.sampler_id  = linear_sampler;
+                push.voxel_ptr   = voxel_ptr;
+                push.voxel_count = voxel_count;
                 glm_mat4_copy(cam.view_proj, push.view_proj);
 
                 vkCmdPushConstants(cmd, renderer.bindless_system.pipeline_layout, VK_SHADER_STAGE_ALL, 0, sizeof(Push), &push);
@@ -372,8 +416,10 @@ int main()
     }
 
 
+printf("Push size = %zu\n", sizeof(Push));
+printf("view_proj offset = %zu\n", offsetof(Push, view_proj));
+    printf(" pushis %zu    ", alignof(Push));
     printf(" renderer size is %zu", sizeof(Renderer));
-    printf(" rt is %zu", sizeof(RenderTarget));
     //    ANALYZE_STRUCT(ImageState);
     //renderer_destroy(&renderer);
     return 0;
