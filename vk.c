@@ -285,6 +285,7 @@ typedef struct RendererCaps
     bool index_type_uint8;       // NEW
     bool subgroup_size_control;  // NEW
     bool debug_printf;           // Debug Printf support (VK_KHR_shader_non_semantic_info)
+    bool pipeline_statistics_query;
 } RendererCaps;
 
 RendererCaps default_caps(void)
@@ -306,6 +307,7 @@ RendererCaps default_caps(void)
         .robustness2           = false,  // I’ll explain below
         .index_type_uint8      = true,
         .subgroup_size_control = false,  // enable later if you need it
+        .pipeline_statistics_query = false,
     };
 }
 static void enable_desc_indexing_feature(VkBool32* feature_field, const char* name)
@@ -359,11 +361,12 @@ static void apply_caps(VkFeatureChain* f, const RendererCaps* caps)
     TRY_ENABLE(debug_printf, f->shaderNonSemanticInfo.shaderNonSemanticInfo, "shaderNonSemanticInfo (Debug Printf)");
 
     TRY_ENABLE(sampler_anisotropy, f->core.features.samplerAnisotropy, "samplerAnisotropy");
+    TRY_ENABLE(multi_draw_indirect, f->core.features.multiDrawIndirect, "multi-draw indirect");
+    TRY_ENABLE(pipeline_statistics_query, f->core.features.pipelineStatisticsQuery, "pipeline statistics query");
     TRY_ENABLE(dynamic_rendering, f->v13.dynamicRendering, "dynamic rendering");
     TRY_ENABLE(sync2, f->v13.synchronization2, "synchronization2");
     TRY_ENABLE(descriptor_indexing, f->v12.descriptorIndexing, "descriptor indexing (vulkan 1.2)");
     TRY_ENABLE(timeline_semaphores, f->v12.timelineSemaphore, "timeline semaphores");
-    TRY_ENABLE(multi_draw_indirect, f->core.features.multiDrawIndirect, "multi-draw indirect");
     TRY_ENABLE(multi_draw_indirect_count, f->v12.drawIndirectCount, "multi-draw indirect count (v1.2)");
     TRY_ENABLE(buffer_device_address, f->v12.bufferDeviceAddress, "buffer device address");
     TRY_ENABLE(maintenance4, f->v13.maintenance4, "maintenance4");
@@ -959,6 +962,11 @@ void renderer_create(Renderer* r, RendererDesc* desc)
             caps.debug_printf = true;
         }
 
+        if(desc->enable_pipeline_stats)
+        {
+            caps.pipeline_statistics_query = true;
+        }
+
         apply_caps(&r->info.feature_chain, &caps);
     }
 
@@ -1334,7 +1342,10 @@ void renderer_create(Renderer* r, RendererDesc* desc)
     {
         forEach(i, MAX_FRAMES_IN_FLIGHT)
         {
-            gpu_profiler_init(&r->gpuprofiler[i], r->device, r->info.properties.limits.timestampPeriod, desc->enable_pipeline_stats);
+            gpu_profiler_init(&r->gpuprofiler[i],
+                              r->device,
+                              r->info.properties.limits.timestampPeriod,
+                              desc->enable_pipeline_stats && r->info.feature_chain.core.features.pipelineStatisticsQuery);
         }
     }
 }

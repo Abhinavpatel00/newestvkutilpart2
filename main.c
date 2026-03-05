@@ -157,7 +157,7 @@ int         main()
             .bindless_sampled_image_count = 65536,
             .bindless_sampler_count       = 256,
             .bindless_storage_image_count = 16384,
-
+            .enable_pipeline_stats        = true,
         };
 
 

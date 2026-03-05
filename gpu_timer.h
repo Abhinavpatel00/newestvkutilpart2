@@ -49,6 +49,10 @@ typedef struct
 FORCE_INLINE void gpu_profiler_init(GpuProfiler* p, VkDevice device, float timestamp_period, bool enable_pipeline_stats)
 {
     p->enable_pipeline_stats = enable_pipeline_stats;
+    p->timestamp_pool        = VK_NULL_HANDLE;
+    p->stats_pool            = VK_NULL_HANDLE;
+    p->query_count           = 0;
+    p->pass_count            = 0;
 
     VkQueryPoolCreateInfo time_info = {.sType      = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
                                        .queryType  = VK_QUERY_TYPE_TIMESTAMP,
@@ -65,7 +69,12 @@ FORCE_INLINE void gpu_profiler_init(GpuProfiler* p, VkDevice device, float times
                                                                   | VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT
                                                                   | VK_QUERY_PIPELINE_STATISTIC_CLIPPING_PRIMITIVES_BIT};
 
-        vkCreateQueryPool(device, &stats_info, NULL, &p->stats_pool);
+        VkResult stats_create_res = vkCreateQueryPool(device, &stats_info, NULL, &p->stats_pool);
+        if(stats_create_res != VK_SUCCESS)
+        {
+            p->enable_pipeline_stats = false;
+            p->stats_pool            = VK_NULL_HANDLE;
+        }
     }
 
     p->timestamp_period = timestamp_period;
@@ -96,7 +105,7 @@ FORCE_INLINE void gpu_profiler_begin_frame(GpuProfiler* p, VkCommandBuffer cmd)
 
     vkCmdResetQueryPool(cmd, p->timestamp_pool, 0, MAX_GPU_PASSES * 2);
 
-    if(p->enable_pipeline_stats)
+    if(p->enable_pipeline_stats && p->stats_pool != VK_NULL_HANDLE)
         vkCmdResetQueryPool(cmd, p->stats_pool, 0, MAX_GPU_PASSES);
 }
 
@@ -112,7 +121,7 @@ FORCE_INLINE void gpu_profiler_begin_pass(GpuProfiler* p, VkCommandBuffer cmd, c
 
     vkCmdWriteTimestamp2(cmd, stage, p->timestamp_pool, q);
 
-    if(p->enable_pipeline_stats)
+    if(p->enable_pipeline_stats && p->stats_pool != VK_NULL_HANDLE)
     {
         vkCmdBeginQuery(cmd, p->stats_pool, pass->stats_query, 0);
     }
@@ -128,7 +137,7 @@ FORCE_INLINE void gpu_profiler_end_pass(GpuProfiler* p, VkCommandBuffer cmd, VkP
 
     vkCmdWriteTimestamp2(cmd, stage, p->timestamp_pool, q);
 
-    if(p->enable_pipeline_stats)
+    if(p->enable_pipeline_stats && p->stats_pool != VK_NULL_HANDLE)
     {
         vkCmdEndQuery(cmd, p->stats_pool, pass->stats_query);
     }
@@ -160,7 +169,7 @@ FORCE_INLINE void gpu_profiler_collect(GpuProfiler* p, VkDevice device)
         pass->time_ms = ns / 1000000.0;
     }
 
-    if(!p->enable_pipeline_stats || p->pass_count == 0)
+    if(!p->enable_pipeline_stats || p->stats_pool == VK_NULL_HANDLE || p->pass_count == 0)
         return;
 
     struct
