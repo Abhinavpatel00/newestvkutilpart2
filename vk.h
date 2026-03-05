@@ -848,8 +848,8 @@ static inline uint64_t time_now_ns()
 static FLOW_INLINE void frame_start(Renderer* renderer, Camera* cam)
 {
 
-renderer->current_frame = (renderer->current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
-	uint64_t now = time_now_ns();
+    renderer->current_frame = (renderer->current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+    uint64_t now            = time_now_ns();
 
     renderer->cpu_frame_ns   = now - renderer->cpu_prev_frame;
     renderer->cpu_prev_frame = now;
@@ -1054,4 +1054,33 @@ renderer->current_frame = (renderer->current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
 
     vk_swapchain_acquire(renderer->device, &renderer->swapchain,
                          renderer->frames[renderer->current_frame].image_available_semaphore, VK_NULL_HANDLE, UINT64_MAX);
+}
+
+
+static FLOW_INLINE void submit_frame(Renderer* r)
+{
+    FrameContext* f   = &r->frames[r->current_frame];
+    uint32_t      img = r->swapchain.current_image;
+
+    VkCommandBufferSubmitInfo cmd = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = f->cmdbuf};
+
+    VkSemaphoreSubmitInfo wait = {.sType     = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+                                  .semaphore = f->image_available_semaphore,
+                                  .stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT};
+
+    VkSemaphoreSubmitInfo signal = {.sType     = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+                                    .semaphore = r->swapchain.render_finished[img],
+                                    .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT};
+
+    VkSubmitInfo2 submit = {.sType                    = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+                            .waitSemaphoreInfoCount   = 1,
+                            .pWaitSemaphoreInfos      = &wait,
+                            .commandBufferInfoCount   = 1,
+                            .pCommandBufferInfos      = &cmd,
+                            .signalSemaphoreInfoCount = 1,
+                            .pSignalSemaphoreInfos    = &signal};
+
+    VK_CHECK(vkQueueSubmit2(r->graphics_queue, 1, &submit, f->in_flight_fence));
+
+    vk_swapchain_present(r->present_queue, &r->swapchain, &r->swapchain.render_finished[r->swapchain.current_image], 1);
 }

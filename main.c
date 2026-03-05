@@ -133,9 +133,9 @@ int main()
     SamplerCreateDesc desc = {.mag_filter = VK_FILTER_LINEAR,
                               .min_filter = VK_FILTER_LINEAR,
 
-                              .address_u = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-                              .address_v = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-                              .address_w = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+                              .address_u   = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+                              .address_v   = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+                              .address_w   = VK_SAMPLER_ADDRESS_MODE_REPEAT,
                               .mipmap_mode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
                               .max_lod     = 1.0f};
 
@@ -363,43 +363,8 @@ int main()
                                    VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0);
         vk_cmd_end(renderer.frames[renderer.current_frame].cmdbuf);
 
-        {
-            VkCommandBufferSubmitInfo cmd_info = {
-                .sType         = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
-                .commandBuffer = renderer.frames[renderer.current_frame].cmdbuf,
-            };
-            VkSemaphoreSubmitInfo wait_info = {
-                .sType       = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
-                .semaphore   = renderer.frames[renderer.current_frame].image_available_semaphore,
-                .value       = 0,
-                .stageMask   = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                .deviceIndex = 0,
-            };
 
-            VkSemaphoreSubmitInfo signal_info = {
-                .sType       = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
-                .semaphore   = renderer.swapchain.render_finished[renderer.swapchain.current_image],
-                .value       = 0,
-                .stageMask   = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                .deviceIndex = 0,
-            };
-
-            VkSubmitInfo2 submit = {
-                .sType                    = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
-                .waitSemaphoreInfoCount   = 1,
-                .pWaitSemaphoreInfos      = &wait_info,
-                .commandBufferInfoCount   = 1,
-                .pCommandBufferInfos      = &cmd_info,
-                .signalSemaphoreInfoCount = 1,
-                .pSignalSemaphoreInfos    = &signal_info,
-            };
-
-            VK_CHECK(vkQueueSubmit2(renderer.graphics_queue, 1, &submit, renderer.frames[renderer.current_frame].in_flight_fence));
-
-
-            vk_swapchain_present(renderer.present_queue, &renderer.swapchain,
-                                 &renderer.swapchain.render_finished[renderer.swapchain.current_image], 1);
-        }
+        submit_frame(&renderer);
     }
 
 
