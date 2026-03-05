@@ -400,7 +400,6 @@ int main()
             vk_swapchain_present(renderer.present_queue, &renderer.swapchain,
                                  &renderer.swapchain.render_finished[renderer.swapchain.current_image], 1);
         }
-        renderer.current_frame = (renderer.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 
 

@@ -847,7 +847,9 @@ static inline uint64_t time_now_ns()
 
 static FLOW_INLINE void frame_start(Renderer* renderer, Camera* cam)
 {
-    uint64_t now = time_now_ns();
+
+renderer->current_frame = (renderer->current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+	uint64_t now = time_now_ns();
 
     renderer->cpu_frame_ns   = now - renderer->cpu_prev_frame;
     renderer->cpu_prev_frame = now;
@@ -1030,7 +1032,6 @@ static FLOW_INLINE void frame_start(Renderer* renderer, Camera* cam)
 
         forEach(i, renderer->swapchain.image_count)
         {
-
             rt_resize(renderer, &renderer->depth[i], fb_w, fb_h);
             rt_resize(renderer, &renderer->hdr_color[i], fb_w, fb_h);
         }
