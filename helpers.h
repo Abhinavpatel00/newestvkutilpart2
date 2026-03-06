@@ -1,5 +1,13 @@
 #include "vk_default.h"
 
+/*
+
+whatevet the fuck u write no one cares here 
+*/
+
+// ededdeded ao
+//
+
 
 FORCE_INLINE void vk_create_fence(VkDevice device, bool signaled, VkFence* out_fence)
 {
