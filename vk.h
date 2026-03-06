@@ -193,9 +193,9 @@ typedef struct ALIGNAS(64) FlowSwapchain
     uint32_t   current_image;
 
     VkImageView image_views[MAX_SWAPCHAIN_IMAGES];
-
-
     VkSemaphore render_finished[MAX_SWAPCHAIN_IMAGES];
+    TextureID   bindless_index[MAX_SWAPCHAIN_IMAGES];
+
     //cold
     VkSwapchainKHR   swapchain;
     VkSurfaceKHR     surface;
@@ -588,10 +588,19 @@ void vk_create_swapchain(VkDevice                       device,
                          FlowSwapchain*                 out_swapchain,
                          const FlowSwapchainCreateInfo* info,
                          VkQueue                        graphics_queue,
-                         VkCommandPool                  one_time_pool);
-void vk_swapchain_destroy(VkDevice device, FlowSwapchain* swapchain);
+                         VkCommandPool                  one_time_pool,
+                         flow_id_pool*                  id_pool);
+void vk_swapchain_destroy(VkDevice device, FlowSwapchain* swapchain, flow_id_pool* id_pool);
 
-void vk_swapchain_recreate(VkDevice device, VkPhysicalDevice gpu, FlowSwapchain* sc, uint32_t new_w, uint32_t new_h, VkQueue graphics_queue, VkCommandPool one_time_pool);
+void             vk_swapchain_recreate(VkDevice         device,
+                                       VkPhysicalDevice gpu,
+                                       FlowSwapchain*   sc,
+                                       uint32_t         new_w,
+                                       uint32_t         new_h,
+                                       VkQueue          graphics_queue,
+                                       VkCommandPool    one_time_pool,
+
+                                       flow_id_pool* id_pool);
 VkPresentModeKHR vk_swapchain_select_present_mode(VkPhysicalDevice physical_device, VkSurfaceKHR surface, bool vsync);
 
 
@@ -782,13 +791,15 @@ SamplerID create_sampler(Renderer* r, const SamplerCreateDesc* desc);
 void      destroy_sampler(Renderer* r, SamplerID id);
 
 
-FLOW_INLINE void rt_transition_mip(VkCommandBuffer cmd, RenderTarget* rt, uint32_t mip, VkPipelineStageFlags2 new_stage, VkAccessFlags2 new_access, VkImageLayout new_layout)
+FLOW_INLINE void rt_transition_mip(VkCommandBuffer cmd, RenderTarget* rt, uint32_t mip, VkImageLayout new_layout, VkPipelineStageFlags2 new_stage, VkAccessFlags2 new_access
+
+)
 {
     assert(mip < rt->mip_count);
     cmd_transition_mip(cmd, rt->image, &rt->mip_states[mip], rt->aspect, mip, new_stage, new_access, new_layout, VK_QUEUE_FAMILY_IGNORED);
 }
 
-FLOW_INLINE void rt_transition_all(VkCommandBuffer cmd, RenderTarget* rt, VkPipelineStageFlags2 new_stage, VkAccessFlags2 new_access, VkImageLayout new_layout)
+FLOW_INLINE void rt_transition_all(VkCommandBuffer cmd, RenderTarget* rt, VkImageLayout new_layout, VkPipelineStageFlags2 new_stage, VkAccessFlags2 new_access)
 {
     for(uint32_t mip = 0; mip < rt->mip_count; mip++)
     {
@@ -831,13 +842,13 @@ static inline uint64_t time_now_ns()
 #define RUN_ONCE for(static int _once = 1; _once; _once = 0)
 
 #define PUSH_CONSTANT(name, BODY)                                                                                      \
-    typedef struct ALIGNAS(16) name_init                                                                               \
+    typedef struct ALIGNAS(16) name##_init                                                                             \
     {                                                                                                                  \
         BODY                                                                                                           \
-    } name_init;                                                                                                       \
+    } name##_init;                                                                                                     \
     enum                                                                                                               \
     {                                                                                                                  \
-        name##_pad_size = 256 - sizeof(name_init)                                                                      \
+        name##_pad_size = 256 - sizeof(name##_init)                                                                    \
     };                                                                                                                 \
                                                                                                                        \
     typedef struct ALIGNAS(16) name                                                                                    \
@@ -854,13 +865,13 @@ static FLOW_INLINE void frame_start(Renderer* renderer, Camera* cam)
     renderer->current_frame = (renderer->current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
     uint64_t now            = time_now_ns();
 
-    renderer->cpu_frame_ns   = now - renderer->cpu_prev_frame;
-    renderer->cpu_wait_ns    = renderer->cpu_wait_accum_ns;
-    renderer->cpu_active_ns  = renderer->cpu_frame_ns - renderer->cpu_wait_ns;
+    renderer->cpu_frame_ns  = now - renderer->cpu_prev_frame;
+    renderer->cpu_wait_ns   = renderer->cpu_wait_accum_ns;
+    renderer->cpu_active_ns = renderer->cpu_frame_ns - renderer->cpu_wait_ns;
     if(renderer->cpu_active_ns < 0.0)
         renderer->cpu_active_ns = 0.0;
     renderer->cpu_wait_accum_ns = 0.0;
-    renderer->cpu_prev_frame = now;
+    renderer->cpu_prev_frame    = now;
 
 
     renderer->dt = (float)renderer->cpu_frame_ns * 1e-9f;
@@ -1040,7 +1051,7 @@ static FLOW_INLINE void frame_start(Renderer* renderer, Camera* cam)
         renderer->cpu_wait_accum_ns += (double)(time_now_ns() - wait_start);
 
         vk_swapchain_recreate(renderer->device, renderer->physical_device, &renderer->swapchain, fb_w, fb_h,
-                              renderer->graphics_queue, renderer->one_time_gfx_pool);
+                              renderer->graphics_queue, renderer->one_time_gfx_pool, &renderer->texture_pool);
 
         forEach(i, renderer->swapchain.image_count)
         {

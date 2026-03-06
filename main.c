@@ -12,7 +12,7 @@
 #include <vulkan/vulkan_core.h>
 #define STB_PERLIN_IMPLEMENTATION
 #include "stb/stb_perlin.h"
-#define VALIDATION false
+#define VALIDATION true
 #define KB(x) ((x) * 1024ULL)
 #define MB(x) ((x) * 1024ULL * 1024ULL)
 #define GB(x) ((x) * 1024ULL * 1024ULL * 1024ULL)
@@ -50,6 +50,7 @@ typedef struct
 typedef enum PipelineID
 {
     TRIANGLE_PIPELINE,
+    POSTPROCESS_PIPELINE,
     PIPELINE_COUNT
 } PipelineID;
 typedef struct RenderPipelines
@@ -268,16 +269,23 @@ int main()
 
         renderer_create(&renderer, &desc);
 
-        GraphicsPipelineConfig cfg                    = pipeline_config_default();
-        cfg.vert_path                                 = "compiledshaders/triangle.vert.spv";
-        cfg.frag_path                                 = "compiledshaders/triangle.frag.spv";
-        cfg.color_attachment_count                    = 1;
-        cfg.depth_format                              = renderer.depth[1].format;
-        cfg.color_formats                             = &renderer.swapchain.format;
-        cfg.polygon_mode                              = VK_POLYGON_MODE_FILL;
-        render_pipelines.pipelines[TRIANGLE_PIPELINE] = create_graphics_pipeline(&renderer, &cfg);
-    }
+        GraphicsPipelineConfig cfg = pipeline_config_default();
+        cfg.vert_path              = "compiledshaders/triangle.vert.spv";
+        cfg.frag_path              = "compiledshaders/triangle.frag.spv";
+        cfg.color_attachment_count = 1;
+        cfg.color_formats          = &renderer.hdr_color[1].format;
 
+        cfg.depth_format = renderer.depth[1].format;
+        cfg.polygon_mode = VK_POLYGON_MODE_FILL;
+
+        render_pipelines.pipelines[TRIANGLE_PIPELINE] = create_graphics_pipeline(&renderer, &cfg);
+        render_pipelines.pipelines[POSTPROCESS_PIPELINE] =
+            create_compute_pipeline(&renderer, "compiledshaders/postprocess.comp.spv");
+ 
+  printf("graphics hdr %d      ", cfg.color_formats[0]);
+  printf(" color hdr %d      ", renderer.hdr_color[1].format);
+  printf(" original color hdr %d",            
+                                   VK_FORMAT_R16G16B16A16_SFLOAT);   }
 
     BufferPool pool = {0};
     buffer_pool_init(&renderer, &pool, MB(256),
@@ -333,7 +341,7 @@ int main()
     };
 
     glfwSetInputMode(renderer.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-static    Chunk chunk = {0};
+    static Chunk chunk = {0};
 
     for(int x = 0; x < CHUNK_SIZE; x++)
         for(int z = 0; z < CHUNK_SIZE; z++)
@@ -414,6 +422,15 @@ static    Chunk chunk = {0};
                   float view_proj[4][4];
 
                   uint32_t texture_id; uint32_t sampler_id;);
+    PUSH_CONSTANT(PostPush, uint src_texture_id; uint output_image_id;
+
+                  uint width; uint height;
+
+                  float exposure; float gamma;
+
+                  uint frame;)
+
+
     while(!glfwWindowShouldClose(renderer.window))
     {
 
@@ -426,17 +443,22 @@ static    Chunk chunk = {0};
                                     1, &renderer.bindless_system.set, 0, NULL);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, renderer.bindless_system.pipeline_layout, 0, 1,
                                     &renderer.bindless_system.set, 0, NULL);
-            image_transition_swapchain(cmd, &renderer.swapchain, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                       VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-            rt_transition_all(cmd, &renderer.depth[renderer.swapchain.current_image],
+            // image_transition_swapchain(cmd, &renderer.swapchain, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            //                            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+            rt_transition_all(cmd, &renderer.depth[renderer.swapchain.current_image], VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
                               VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-                              VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
-                              VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL);
+                              VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT);
+            rt_transition_all(cmd, &renderer.hdr_color[renderer.swapchain.current_image], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                              VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+
+            image_transition_swapchain(cmd, &renderer.swapchain, VK_IMAGE_LAYOUT_GENERAL,
+                                       VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         }
 
-        VkRenderingAttachmentInfo color = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-                                           .imageView = renderer.swapchain.image_views[renderer.swapchain.current_image],
-                                           .imageLayout = renderer.swapchain.states[renderer.swapchain.current_image].layout,
+        VkRenderingAttachmentInfo color = {.sType     = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                                           .imageView = renderer.hdr_color[renderer.swapchain.current_image].view,
+                                           .imageLayout =
+                                               renderer.hdr_color[renderer.swapchain.current_image].mip_states[0].layout,
                                            .loadOp           = VK_ATTACHMENT_LOAD_OP_CLEAR,
                                            .storeOp          = VK_ATTACHMENT_STORE_OP_STORE,
                                            .clearValue.color = {{0.1f, 0.1f, 0.1f, 1.0f}}};
@@ -543,6 +565,27 @@ static    Chunk chunk = {0};
 
 
             vkCmdEndRendering(cmd);
+        }
+
+        {
+
+
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, render_pipelines.pipelines[POSTPROCESS_PIPELINE]);
+
+            PostPush push        = {0};
+            push.src_texture_id  = renderer.hdr_color[renderer.swapchain.current_image].bindless_index;
+            push.output_image_id = renderer.swapchain.bindless_index[renderer.swapchain.current_image];
+            push.width           = renderer.swapchain.extent.width;
+            push.height          = renderer.swapchain.extent.height;
+            push.exposure        = 1.0f;
+            push.gamma           = 2.2f;
+
+            vkCmdPushConstants(cmd, renderer.bindless_system.pipeline_layout, VK_SHADER_STAGE_ALL, 0, sizeof(PostPush), &push);
+
+            uint32_t gx = (push.width + 15) / 16;
+            uint32_t gy = (push.height + 15) / 16;
+
+            vkCmdDispatch(cmd, gx, gy, 1);
         }
 
         image_transition_swapchain(renderer.frames[renderer.current_frame].cmdbuf, &renderer.swapchain,

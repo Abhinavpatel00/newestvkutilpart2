@@ -1,4 +1,3 @@
-
 #!/usr/bin/env bash
 
 set -e
@@ -33,9 +32,17 @@ for file in "$SRC_DIR"/*.slang; do
 
     name=$(basename "$file" .slang)
 
-    compile_stage vertex   vs_main "$file" "$OUT_DIR/$name.vert.spv"
-    compile_stage fragment fs_main "$file" "$OUT_DIR/$name.frag.spv"
+    # Only compile vertex stage if vs_main exists
+    if grep -q "\bvs_main\b" "$file"; then
+        compile_stage vertex   vs_main "$file" "$OUT_DIR/$name.vert.spv"
+    fi
 
+    # Only compile fragment stage if fs_main exists
+    if grep -q "\bfs_main\b" "$file"; then
+        compile_stage fragment fs_main "$file" "$OUT_DIR/$name.frag.spv"
+    fi
+
+    # Only compile compute stage if cs_main exists
     if grep -q "\bcs_main\b" "$file"; then
         compile_stage compute  cs_main "$file" "$OUT_DIR/$name.comp.spv"
     fi

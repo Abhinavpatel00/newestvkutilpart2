@@ -300,12 +300,12 @@ RendererCaps default_caps(void)
         .maintenance4              = true,
         .bindless_textures         = true,
 
-        .sampler_anisotropy    = true,
-        .atomic_int64          = true,
-        .scalar_block_layout   = true,
-        .robustness2           = false,  // I’ll explain below
-        .index_type_uint8      = true,
-        .subgroup_size_control = false,  // enable later if you need it
+        .sampler_anisotropy        = true,
+        .atomic_int64              = true,
+        .scalar_block_layout       = true,
+        .robustness2               = false,  // I’ll explain below
+        .index_type_uint8          = true,
+        .subgroup_size_control     = false,  // enable later if you need it
         .pipeline_statistics_query = false,
     };
 }
@@ -1113,14 +1113,18 @@ void renderer_create(Renderer* r, RendererDesc* desc)
 
     log_info("[renderer] frame contexts created");
 
-    r->current_frame = 0;
-    r->cpu_prev_frame = (double)time_now_ns();
-    r->cpu_frame_ns = 0.0;
-    r->cpu_active_ns = 0.0;
-    r->cpu_wait_ns = 0.0;
+    r->current_frame     = 0;
+    r->cpu_prev_frame    = (double)time_now_ns();
+    r->cpu_frame_ns      = 0.0;
+    r->cpu_active_ns     = 0.0;
+    r->cpu_wait_ns       = 0.0;
     r->cpu_wait_accum_ns = 0.0;
 
     log_info("[renderer] initialization complete");
+
+
+    flow_id_pool_init(&r->texture_pool, MAX_BINDLESS_TEXTURES);
+    flow_id_pool_init(&r->sampler_pool, MAX_BINDLESS_SAMPLERS);
 
 
     vk_cmd_create_pool(r->device, r->graphics_queue_index, true, false, &r->one_time_gfx_pool);
@@ -1148,13 +1152,13 @@ void renderer_create(Renderer* r, RendererDesc* desc)
         sci.preferred_present_mode = vk_swapchain_select_present_mode(r->physical_device, r->surface, desc->vsync);
     }
 
-    vk_create_swapchain(r->device, r->physical_device, &r->swapchain, &sci, r->graphics_queue, r->one_time_gfx_pool);
+    vk_create_swapchain(r->device, r->physical_device, &r->swapchain, &sci, r->graphics_queue, r->one_time_gfx_pool,&r->texture_pool);
 
 
     //  descriptor_layout_cache_init(&r->descriptor_layout_cache);
     //pipeline_layout_cache_init(&r->pipeline_layout_cache);
     r->pipeline_cache = pipeline_cache_load_or_create(r->device, r->physical_device, "pipeline_cache.bin");
-    VkDescriptorSetLayoutBinding bindings[] = {// textures
+   VkDescriptorSetLayoutBinding bindings[] = {// textures
                                                {
                                                    .binding         = BINDLESS_TEXTURE_BINDING,
                                                    .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
@@ -1309,10 +1313,6 @@ void renderer_create(Renderer* r, RendererDesc* desc)
                r->swapchain.format, depth_format, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
 
 
-    flow_id_pool_init(&r->texture_pool, MAX_BINDLESS_TEXTURES);
-    flow_id_pool_init(&r->sampler_pool, MAX_BINDLESS_SAMPLERS);
-
-
     RenderTargetSpec depth_spec = {.width  = r->swapchain.extent.width,
                                    .height = r->swapchain.extent.height,
                                    .layers = 1,
@@ -1325,11 +1325,11 @@ void renderer_create(Renderer* r, RendererDesc* desc)
 
                                    .mip_count  = 1,
                                    .debug_name = "depth_buffer"};
-    RenderTargetSpec hdr_spec   = {.width      = r->swapchain.extent.width,
-                                   .height     = r->swapchain.extent.height,
-                                   .layers     = 1,
-                                   .format     = VK_FORMAT_R16G16B16A16_SFLOAT,
-                                   .usage      = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+    RenderTargetSpec hdr_spec   = {.width  = r->swapchain.extent.width,
+                                   .height = r->swapchain.extent.height,
+                                   .layers = 1,
+                                   .format = VK_FORMAT_R16G16B16A16_SFLOAT,
+                                   .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
                                    .mip_count  = 1,
                                    .debug_name = "hdr_color"};
 
@@ -1346,9 +1346,7 @@ void renderer_create(Renderer* r, RendererDesc* desc)
     {
         forEach(i, MAX_FRAMES_IN_FLIGHT)
         {
-            gpu_profiler_init(&r->gpuprofiler[i],
-                              r->device,
-                              r->info.properties.limits.timestampPeriod,
+            gpu_profiler_init(&r->gpuprofiler[i], r->device, r->info.properties.limits.timestampPeriod,
                               desc->enable_pipeline_stats && r->info.feature_chain.core.features.pipelineStatisticsQuery);
         }
     }
@@ -1541,7 +1539,8 @@ void vk_create_swapchain(VkDevice                       device,
                          FlowSwapchain*                 out_swapchain,
                          const FlowSwapchainCreateInfo* info,
                          VkQueue                        graphics_queue,
-                         VkCommandPool                  one_time_pool)
+                         VkCommandPool                  one_time_pool,
+                         flow_id_pool*                  id_pool)
 {
     VkSurfaceCapabilities2KHR caps = query_surface_capabilities(gpu, info->surface);
 
@@ -1598,66 +1597,25 @@ void vk_create_swapchain(VkDevice                       device,
         VkImageViewCreateInfo view_ci = VK_IMAGE_VIEW_DEFAULT(out_swapchain->images[i], out_swapchain->format);
         VK_CHECK(vkCreateImageView(device, &view_ci, NULL, &out_swapchain->image_views[i]));
     }
-    //
-    // // Optional: transition all swapchain images UNDEFINED -> PRESENT
-    // {
-    //     VkCommandBuffer cmd = begin_one_time_cmd(device, one_time_pool);
-    //
-    //     forEach(i, out_swapchain->image_count)
-    //     {
-    //         VkImageMemoryBarrier2 barrier = {
-    //             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-    //
-    //             .srcStageMask  = VK_PIPELINE_STAGE_2_NONE,
-    //             .srcAccessMask = 0,
-    //
-    //             .dstStageMask  = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
-    //             .dstAccessMask = 0,
-    //
-    //             .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-    //             .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-    //
-    //             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-    //             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-    //
-    //             .image = out_swapchain->images[i],
-    //
-    //             .subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
-    //             .subresourceRange.baseMipLevel   = 0,
-    //             .subresourceRange.levelCount     = 1,
-    //             .subresourceRange.baseArrayLayer = 0,
-    //             .subresourceRange.layerCount     = 1,
-    //         };
-    //
-    //         VkDependencyInfo dep = {
-    //             .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-    //
-    //             .imageMemoryBarrierCount = 1,
-    //             .pImageMemoryBarriers    = &barrier,
-    //         };
-    //
-    //         vkCmdPipelineBarrier2(cmd, &dep);
-    //     }
-    //
-    //     end_one_time_cmd(device, graphics_queue, one_time_pool, cmd);
-    // }
-
     forEach(i, out_swapchain->image_count)
     {
         out_swapchain->states[i] =
             (ImageState){.layout = VK_IMAGE_LAYOUT_UNDEFINED, .stage = VK_PIPELINE_STAGE_2_NONE, .access = 0, .validity = IMAGE_STATE_UNDEFINED};
+
+        flow_id_pool_create_id(id_pool, &out_swapchain->bindless_index[i]);
     }
     vk_create_semaphores(device, out_swapchain->image_count, out_swapchain->render_finished);
 }
 
 
-void vk_swapchain_destroy(VkDevice device, FlowSwapchain* swapchain)
+void vk_swapchain_destroy(VkDevice device, FlowSwapchain* swapchain, flow_id_pool* id_pool)
 {
     if(!swapchain)
         return;
 
     forEach(i, swapchain->image_count)
     {
+        flow_id_pool_destroy_id(id_pool, swapchain->bindless_index[i]);
         if(swapchain->image_views[i] != VK_NULL_HANDLE)
         {
             vkDestroyImageView(device, swapchain->image_views[i], NULL);
@@ -1674,7 +1632,7 @@ void vk_swapchain_destroy(VkDevice device, FlowSwapchain* swapchain)
 }
 
 
-void vk_swapchain_recreate(VkDevice device, VkPhysicalDevice gpu, FlowSwapchain* sc, uint32_t new_w, uint32_t new_h, VkQueue graphics_queue, VkCommandPool one_time_pool)
+void vk_swapchain_recreate(VkDevice device, VkPhysicalDevice gpu, FlowSwapchain* sc, uint32_t new_w, uint32_t new_h, VkQueue graphics_queue, VkCommandPool one_time_pool,flow_id_pool* id_pool)
 
 
 {
@@ -1703,7 +1661,7 @@ void vk_swapchain_recreate(VkDevice device, VkPhysicalDevice gpu, FlowSwapchain*
 
     VkSwapchainKHR old = sc->swapchain;
 
-    vk_create_swapchain(device, gpu, sc, &info, graphics_queue, one_time_pool);
+    vk_create_swapchain(device, gpu, sc, &info, graphics_queue, one_time_pool,id_pool);
 
     if(old)
         vkDestroySwapchainKHR(device, old, NULL);
