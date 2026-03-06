@@ -17,6 +17,8 @@
 #define MB(x) ((x) * 1024ULL * 1024ULL)
 #define GB(x) ((x) * 1024ULL * 1024ULL * 1024ULL)
 #define PAD(name, size) uint8_t name[(size)]
+// imp gpu validation shows false positives may be bacause of data races
+
 typedef struct
 {
     float pos[3];
@@ -422,15 +424,150 @@ int main()
                   float view_proj[4][4];
 
                   uint32_t texture_id; uint32_t sampler_id;);
-    PUSH_CONSTANT(PostPush, uint src_texture_id; uint output_image_id;
+    // Flag bits — must match postprocess.slang
+    enum {
+        PP_FLAG_EXPOSURE      = (1u <<  0),
+        PP_FLAG_TONEMAP       = (1u <<  1),
+        PP_FLAG_GAMMA         = (1u <<  2),
+        PP_FLAG_CONTRAST      = (1u <<  3),
+        PP_FLAG_SATURATION    = (1u <<  4),
+        PP_FLAG_WHITE_BALANCE = (1u <<  5),
+        PP_FLAG_VIGNETTE      = (1u <<  6),
+        PP_FLAG_GRAIN         = (1u <<  7),
+        PP_FLAG_SHARPEN       = (1u <<  8),
+        PP_FLAG_CA            = (1u <<  9),
+        PP_FLAG_DITHER        = (1u << 10),
+        PP_FLAG_SEPIA         = (1u << 11),
+        PP_FLAG_LIFT_GAIN     = (1u << 12),
+    };
 
-                  uint width; uint height;
+    PUSH_CONSTANT(PostPush,
+        uint32_t src_texture_id;
+        uint32_t output_image_id;
+        uint32_t sampler_id;
 
-                  float exposure; float gamma;
+        uint32_t width;
+        uint32_t height;
 
-                  uint frame;)
+        uint32_t flags;
+        uint32_t tonemap_mode;
 
+        float exposure;
+        float gamma_value;
 
+        float contrast;
+        float saturation;
+        float temperature;
+        float tint;
+
+        float vignette_intensity;
+        float vignette_smoothness;
+        float sharpen_strength;
+        float ca_strength;
+
+        float grain_intensity;
+        float sepia_intensity;
+        float dither_strength;
+        uint32_t frame;
+
+        float lift_r;
+        float lift_g;
+        float lift_b;
+        float gain_r;
+        float gain_g;
+        float gain_b;
+    )
+
+    // Tonemap operator names for the ImGui combo box
+    static const char* tonemap_names[] = {
+        "Neutral (Khronos PBR)",
+        "ACES (Narkowicz)",
+        "Reinhard",
+        "Reinhard2",
+        "Filmic (Hejl)",
+        "Uncharted 2",
+        "Unreal",
+    };
+
+    typedef struct PostProcessSettings
+    {
+        // toggles
+        bool enable_exposure;
+        bool enable_tonemap;
+        bool enable_gamma;
+        bool enable_contrast;
+        bool enable_saturation;
+        bool enable_white_balance;
+        bool enable_vignette;
+        bool enable_grain;
+        bool enable_sharpen;
+        bool enable_ca;
+        bool enable_dither;
+        bool enable_sepia;
+        bool enable_lift_gain;
+
+        int  tonemap_mode;
+
+        float exposure;
+        float gamma;
+
+        float contrast;
+        float saturation;
+        float temperature;
+        float tint;
+
+        float vignette_intensity;
+        float vignette_smoothness;
+        float sharpen_strength;
+        float ca_strength;
+
+        float grain_intensity;
+        float sepia_intensity;
+        float dither_strength;
+
+        float lift[3];
+        float gain[3];
+    } PostProcessSettings;
+
+    PostProcessSettings post = {
+        .enable_exposure      = true,
+        .enable_tonemap       = true,
+        .enable_gamma         = true,
+        .enable_contrast      = false,
+        .enable_saturation    = false,
+        .enable_white_balance = false,
+        .enable_vignette      = false,
+        .enable_grain         = false,
+        .enable_sharpen       = false,
+        .enable_ca            = false,
+        .enable_dither        = true,
+        .enable_sepia         = false,
+        .enable_lift_gain     = false,
+
+        .tonemap_mode = 0,
+
+        .exposure = 1.0f,
+        .gamma    = 2.2f,
+
+        .contrast   = 1.0f,
+        .saturation = 1.0f,
+        .temperature = 0.0f,
+        .tint        = 0.0f,
+
+        .vignette_intensity  = 1.0f,
+        .vignette_smoothness = 0.4f,
+        .sharpen_strength    = 0.5f,
+        .ca_strength         = 2.0f,
+
+        .grain_intensity  = 0.15f,
+        .sepia_intensity  = 0.5f,
+        .dither_strength  = 1.0f,
+
+        .lift = {0.0f, 0.0f, 0.0f},
+        .gain = {1.0f, 1.0f, 1.0f},
+    };
+
+    uint32_t pp_frame_counter = 0;
     while(!glfwWindowShouldClose(renderer.window))
     {
 
@@ -443,8 +580,6 @@ int main()
                                     1, &renderer.bindless_system.set, 0, NULL);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, renderer.bindless_system.pipeline_layout, 0, 1,
                                     &renderer.bindless_system.set, 0, NULL);
-            // image_transition_swapchain(cmd, &renderer.swapchain, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            //                            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
             rt_transition_all(cmd, &renderer.depth[renderer.swapchain.current_image], VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
                               VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
                               VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT);
@@ -497,6 +632,87 @@ int main()
             igText("CPU active: %.3f ms", cpu_active_ms);
             igText("CPU wait: %.3f ms", cpu_wait_ms);
             igText("FPS: %.1f", cpu_frame_ms > 0.0 ? 1000.0 / cpu_frame_ms : 0.0);
+
+            igSeparator();
+            if (igCollapsingHeader_TreeNodeFlags("Post Processing", ImGuiTreeNodeFlags_DefaultOpen))
+            {
+                // ── Core ──
+                igCheckbox("Exposure", &post.enable_exposure);
+                if (post.enable_exposure)
+                    igSliderFloat("Exposure Value", &post.exposure, 0.01f, 10.0f, "%.3f", 0);
+
+                igCheckbox("Tone Mapping", &post.enable_tonemap);
+                if (post.enable_tonemap)
+                    igCombo_Str_arr("Operator", &post.tonemap_mode, tonemap_names, 7, 0);
+
+                igCheckbox("Gamma Correction", &post.enable_gamma);
+                if (post.enable_gamma)
+                    igSliderFloat("Gamma", &post.gamma, 0.5f, 4.0f, "%.2f", 0);
+
+                igSeparator();
+
+                // ── Color Grading ──
+                if (igCollapsingHeader_TreeNodeFlags("Color Grading", 0))
+                {
+                    igCheckbox("Contrast", &post.enable_contrast);
+                    if (post.enable_contrast)
+                        igSliderFloat("Contrast##val", &post.contrast, 0.0f, 3.0f, "%.2f", 0);
+
+                    igCheckbox("Saturation", &post.enable_saturation);
+                    if (post.enable_saturation)
+                        igSliderFloat("Saturation##val", &post.saturation, 0.0f, 3.0f, "%.2f", 0);
+
+                    igCheckbox("White Balance", &post.enable_white_balance);
+                    if (post.enable_white_balance)
+                    {
+                        igSliderFloat("Temperature", &post.temperature, -1.0f, 1.0f, "%.3f", 0);
+                        igSliderFloat("Tint", &post.tint, -1.0f, 1.0f, "%.3f", 0);
+                    }
+
+                    igCheckbox("Sepia", &post.enable_sepia);
+                    if (post.enable_sepia)
+                        igSliderFloat("Sepia##val", &post.sepia_intensity, 0.0f, 1.0f, "%.2f", 0);
+
+                    igCheckbox("Lift / Gain", &post.enable_lift_gain);
+                    if (post.enable_lift_gain)
+                    {
+                        igColorEdit3("Lift (Shadows)", post.lift, 0);
+                        igColorEdit3("Gain (Highlights)", post.gain, 0);
+                    }
+                }
+
+                // ── Spatial Effects ──
+                if (igCollapsingHeader_TreeNodeFlags("Spatial Effects", 0))
+                {
+                    igCheckbox("Sharpen", &post.enable_sharpen);
+                    if (post.enable_sharpen)
+                        igSliderFloat("Sharpen##val", &post.sharpen_strength, 0.0f, 2.0f, "%.2f", 0);
+
+                    igCheckbox("Chromatic Aberration", &post.enable_ca);
+                    if (post.enable_ca)
+                        igSliderFloat("CA Strength", &post.ca_strength, 0.0f, 20.0f, "%.1f", 0);
+
+                    igCheckbox("Vignette", &post.enable_vignette);
+                    if (post.enable_vignette)
+                    {
+                        igSliderFloat("Vignette Intensity", &post.vignette_intensity, 0.0f, 3.0f, "%.2f", 0);
+                        igSliderFloat("Vignette Smoothness", &post.vignette_smoothness, 0.01f, 1.0f, "%.2f", 0);
+                    }
+                }
+
+                // ── Noise / Output ──
+                if (igCollapsingHeader_TreeNodeFlags("Noise & Output", 0))
+                {
+                    igCheckbox("Film Grain", &post.enable_grain);
+                    if (post.enable_grain)
+                        igSliderFloat("Grain##val", &post.grain_intensity, 0.0f, 1.0f, "%.3f", 0);
+
+                    igCheckbox("Dithering", &post.enable_dither);
+                    if (post.enable_dither)
+                        igSliderFloat("Dither##val", &post.dither_strength, 0.0f, 4.0f, "%.2f", 0);
+                }
+            }
+
             igSeparator();
 
             igText("Camera Position");
@@ -566,27 +782,60 @@ int main()
 
             vkCmdEndRendering(cmd);
         }
-
+        rt_transition_all(cmd, &renderer.hdr_color[renderer.swapchain.current_image], VK_IMAGE_LAYOUT_GENERAL,
+                          VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
         {
 
 
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, render_pipelines.pipelines[POSTPROCESS_PIPELINE]);
 
-            printf("HDR index = %u\n", renderer.hdr_color[renderer.swapchain.current_image].bindless_index);
-            printf("LDR index = %u\n", renderer.ldr_color[renderer.swapchain.current_image].bindless_index);
-            PostPush push       = {0};
-            push.src_texture_id = renderer.hdr_color[renderer.swapchain.current_image].bindless_index;
+            uint32_t pp_flags = 0;
+            if (post.enable_exposure)      pp_flags |= PP_FLAG_EXPOSURE;
+            if (post.enable_tonemap)       pp_flags |= PP_FLAG_TONEMAP;
+            if (post.enable_gamma)         pp_flags |= PP_FLAG_GAMMA;
+            if (post.enable_contrast)      pp_flags |= PP_FLAG_CONTRAST;
+            if (post.enable_saturation)    pp_flags |= PP_FLAG_SATURATION;
+            if (post.enable_white_balance) pp_flags |= PP_FLAG_WHITE_BALANCE;
+            if (post.enable_vignette)      pp_flags |= PP_FLAG_VIGNETTE;
+            if (post.enable_grain)         pp_flags |= PP_FLAG_GRAIN;
+            if (post.enable_sharpen)       pp_flags |= PP_FLAG_SHARPEN;
+            if (post.enable_ca)            pp_flags |= PP_FLAG_CA;
+            if (post.enable_dither)        pp_flags |= PP_FLAG_DITHER;
+            if (post.enable_sepia)         pp_flags |= PP_FLAG_SEPIA;
+            if (post.enable_lift_gain)     pp_flags |= PP_FLAG_LIFT_GAIN;
 
-            push.output_image_id = renderer.ldr_color[renderer.swapchain.current_image].bindless_index;
+            PostPush pp_push       = {0};
+            pp_push.src_texture_id  = renderer.hdr_color[renderer.swapchain.current_image].bindless_index;
+            pp_push.output_image_id = renderer.ldr_color[renderer.swapchain.current_image].bindless_index;
+            pp_push.sampler_id      = linear_sampler;
+            pp_push.width           = renderer.swapchain.extent.width;
+            pp_push.height          = renderer.swapchain.extent.height;
+            pp_push.flags           = pp_flags;
+            pp_push.tonemap_mode    = (uint32_t)post.tonemap_mode;
+            pp_push.exposure        = post.exposure;
+            pp_push.gamma_value     = post.gamma;
+            pp_push.contrast        = post.contrast;
+            pp_push.saturation      = post.saturation;
+            pp_push.temperature     = post.temperature;
+            pp_push.tint            = post.tint;
+            pp_push.vignette_intensity  = post.vignette_intensity;
+            pp_push.vignette_smoothness = post.vignette_smoothness;
+            pp_push.sharpen_strength    = post.sharpen_strength;
+            pp_push.ca_strength         = post.ca_strength;
+            pp_push.grain_intensity     = post.grain_intensity;
+            pp_push.sepia_intensity     = post.sepia_intensity;
+            pp_push.dither_strength     = post.dither_strength;
+            pp_push.frame               = pp_frame_counter++;
+            pp_push.lift_r = post.lift[0];
+            pp_push.lift_g = post.lift[1];
+            pp_push.lift_b = post.lift[2];
+            pp_push.gain_r = post.gain[0];
+            pp_push.gain_g = post.gain[1];
+            pp_push.gain_b = post.gain[2];
+            vkCmdPushConstants(cmd, renderer.bindless_system.pipeline_layout, VK_SHADER_STAGE_ALL, 0, sizeof(PostPush), &pp_push);
 
-            push.width    = renderer.swapchain.extent.width;
-            push.height   = renderer.swapchain.extent.height;
-            push.exposure = 1.0f;
-            push.gamma    = 2.2f;
-            vkCmdPushConstants(cmd, renderer.bindless_system.pipeline_layout, VK_SHADER_STAGE_ALL, 0, sizeof(PostPush), &push);
-
-            uint32_t gx = (push.width + 15) / 16;
-            uint32_t gy = (push.height + 15) / 16;
+            uint32_t gx = (pp_push.width + 15) / 16;
+            uint32_t gy = (pp_push.height + 15) / 16;
 
             vkCmdDispatch(cmd, gx, gy, 1);
         }
@@ -604,8 +853,7 @@ int main()
 
         vkCmdBlitImage(cmd, renderer.ldr_color[renderer.swapchain.current_image].image,
                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, renderer.swapchain.images[renderer.swapchain.current_image],
-                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                       1, &blit, VK_FILTER_NEAREST);
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
 
         image_transition_swapchain(renderer.frames[renderer.current_frame].cmdbuf, &renderer.swapchain,
                                    VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, 0);

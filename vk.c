@@ -1336,11 +1336,11 @@ void renderer_create(Renderer* r, RendererDesc* desc)
 
                                    .mip_count  = 1,
                                    .debug_name = "depth_buffer"};
-    RenderTargetSpec hdr_spec   = {.width      = r->swapchain.extent.width,
-                                   .height     = r->swapchain.extent.height,
-                                   .layers     = 1,
-                                   .format     = hdr_format,
-                                   .usage      = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
+    RenderTargetSpec hdr_spec   = {.width  = r->swapchain.extent.width,
+                                   .height = r->swapchain.extent.height,
+                                   .layers = 1,
+                                   .format = hdr_format,
+                                   .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                                    .mip_count  = 1,
                                    .debug_name = "hdr_color"};
     RenderTargetSpec ldr_spec   = {.width  = r->swapchain.extent.width,
@@ -1384,8 +1384,8 @@ void renderer_create(Renderer* r, RendererDesc* desc)
                                         .height    = h,
                                         .mip_count = 1,
                                         .format    = VK_FORMAT_R8G8B8A8_UNORM,
-                                        .usage     = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_STORAGE_BIT};
-        TextureID  id         = create_texture(r, &desc);
+                                        .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT};
+        TextureID         id         = create_texture(r, &desc);
         Texture*          tex        = &r->textures[id];
         VkDeviceSize      image_size = w * h * 4;
         Buffer            staging;
@@ -1420,19 +1420,7 @@ void renderer_create(Renderer* r, RendererDesc* desc)
         vk_end_one_time_cmd(r->device, r->graphics_queue, r->one_time_gfx_pool, cmd);
         destroy_buffer(r, &staging);
 
-	r->dummy_texture = id;
-    
-
-
-
-
-
-
-
-
-
-
-
+        r->dummy_texture = id;
     };
     {
         forEach(i, MAX_FRAMES_IN_FLIGHT)
@@ -2893,6 +2881,8 @@ bool rt_create(Renderer* r, RenderTarget* rt, const RenderTargetSpec* spec)
     }
     if(spec->usage & VK_IMAGE_USAGE_STORAGE_BIT)
     {
+
+
         VkDescriptorImageInfo img = {.imageView = rt->view, .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
 
         VkWriteDescriptorSet write = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,

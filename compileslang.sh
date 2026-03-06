@@ -32,7 +32,8 @@ compile_stage ()
             -target spirv \
             -entry "$entry" \
             -stage "$stage" \
-            $SLANG_FLAGS \
+            -I shaders \
+	    $SLANG_FLAGS \
             ${SLANG_DEFINES:-} \
             -o "$out"
     fi
