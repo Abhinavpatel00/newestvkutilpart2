@@ -242,7 +242,7 @@ int main()
             .instance_layer_count        = 0,
             .instance_extension_count    = glfw_ext_count,
             .device_extension_count      = 2,
-            .enable_gpu_based_validation = VALIDATION,
+            .enable_gpu_based_validation = false,
             .enable_validation           = VALIDATION,
 
             .validation_severity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT
@@ -254,9 +254,9 @@ int main()
 
             .swapchain_preferred_color_space = VK_COLORSPACE_SRGB_NONLINEAR_KHR,
             .swapchain_preferred_format      = VK_FORMAT_B8G8R8A8_UNORM,
-            .swapchain_extra_usage_flags     = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
-            .vsync                           = false,
-            .enable_debug_printf             = false,  // Enable shader debug printf
+            .swapchain_extra_usage_flags = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
+            .vsync               = false,
+            .enable_debug_printf = false,  // Enable shader debug printf
 
             .bindless_sampled_image_count     = 65536,
             .bindless_sampler_count           = 256,
@@ -281,11 +281,11 @@ int main()
         render_pipelines.pipelines[TRIANGLE_PIPELINE] = create_graphics_pipeline(&renderer, &cfg);
         render_pipelines.pipelines[POSTPROCESS_PIPELINE] =
             create_compute_pipeline(&renderer, "compiledshaders/postprocess.comp.spv");
- 
-  printf("graphics hdr %d      ", cfg.color_formats[0]);
-  printf(" color hdr %d      ", renderer.hdr_color[1].format);
-  printf(" original color hdr %d",            
-                                   VK_FORMAT_R16G16B16A16_SFLOAT);   }
+
+        printf("graphics hdr %d      ", cfg.color_formats[0]);
+        printf(" color hdr %d      ", renderer.hdr_color[1].format);
+        printf(" original color hdr %d", VK_FORMAT_R16G16B16A16_SFLOAT);
+    }
 
     BufferPool pool = {0};
     buffer_pool_init(&renderer, &pool, MB(256),
@@ -572,14 +572,17 @@ int main()
 
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, render_pipelines.pipelines[POSTPROCESS_PIPELINE]);
 
-            PostPush push        = {0};
-            push.src_texture_id  = renderer.hdr_color[renderer.swapchain.current_image].bindless_index;
-            push.output_image_id = renderer.swapchain.bindless_index[renderer.swapchain.current_image];
-            push.width           = renderer.swapchain.extent.width;
-            push.height          = renderer.swapchain.extent.height;
-            push.exposure        = 1.0f;
-            push.gamma           = 2.2f;
+            printf("HDR index = %u\n", renderer.hdr_color[renderer.swapchain.current_image].bindless_index);
+            printf("LDR index = %u\n", renderer.ldr_color[renderer.swapchain.current_image].bindless_index);
+            PostPush push       = {0};
+            push.src_texture_id = renderer.hdr_color[renderer.swapchain.current_image].bindless_index;
 
+            push.output_image_id = renderer.ldr_color[renderer.swapchain.current_image].bindless_index;
+
+            push.width    = renderer.swapchain.extent.width;
+            push.height   = renderer.swapchain.extent.height;
+            push.exposure = 1.0f;
+            push.gamma    = 2.2f;
             vkCmdPushConstants(cmd, renderer.bindless_system.pipeline_layout, VK_SHADER_STAGE_ALL, 0, sizeof(PostPush), &push);
 
             uint32_t gx = (push.width + 15) / 16;
@@ -587,9 +590,27 @@ int main()
 
             vkCmdDispatch(cmd, gx, gy, 1);
         }
+        rt_transition_all(cmd, &renderer.ldr_color[renderer.swapchain.current_image], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                          VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+        image_transition_swapchain(renderer.frames[renderer.current_frame].cmdbuf, &renderer.swapchain,
+                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_TRANSFER_BIT, 0);
+
+        VkImageBlit blit = {
+            .srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
+            .srcOffsets = {{0, 0, 0}, {renderer.swapchain.extent.width, renderer.swapchain.extent.height, 1}},
+
+            .dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
+            .dstOffsets = {{0, 0, 0}, {renderer.swapchain.extent.width, renderer.swapchain.extent.height, 1}}};
+
+        vkCmdBlitImage(cmd, renderer.ldr_color[renderer.swapchain.current_image].image,
+                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, renderer.swapchain.images[renderer.swapchain.current_image],
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       1, &blit, VK_FILTER_NEAREST);
 
         image_transition_swapchain(renderer.frames[renderer.current_frame].cmdbuf, &renderer.swapchain,
                                    VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, 0);
+
+
         vk_cmd_end(renderer.frames[renderer.current_frame].cmdbuf);
 
 

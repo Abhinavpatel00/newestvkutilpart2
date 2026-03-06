@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 
+MODE=${1:-debug}
+
+if [ "$MODE" = "debug" ]; then
+    SLANG_FLAGS="-g -O0 -line-directive-mode standard"
+else
+    SLANG_FLAGS="-O3"
+fi
 set -e
 
 SRC_DIR="shaders"
@@ -10,6 +17,7 @@ mkdir -p "$OUT_DIR"
 echo "Compiling Slang shaders..."
 echo
 
+
 compile_stage ()
 {
     local stage="$1"
@@ -18,16 +26,17 @@ compile_stage ()
     local out="$4"
 
     if [ ! -f "$out" ] || [ "$src" -nt "$out" ]; then
-        echo "  $stage → $out"
-    /opt/shader-slang-bin/bin/slangc "$src" \
+        echo "  $stage → $out ($MODE)"
+
+        /opt/shader-slang-bin/bin/slangc "$src" \
             -target spirv \
             -entry "$entry" \
             -stage "$stage" \
+            $SLANG_FLAGS \
             ${SLANG_DEFINES:-} \
             -o "$out"
     fi
 }
-
 for file in "$SRC_DIR"/*.slang; do
 
     name=$(basename "$file" .slang)

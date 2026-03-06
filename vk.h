@@ -72,10 +72,7 @@ typedef uint32_t TextureID;
 typedef struct
 {
     VkInstance instance;
-#ifdef DEBUG
     VkDebugUtilsMessengerEXT debug_messenger;
-#endif
-
     VkAllocationCallbacks* allocatorcallbacks;
 } InstanceContext;
 
@@ -343,7 +340,11 @@ typedef struct
     Frustum          frustum;
     VkDescriptorPool imgui_pool;
     RenderTarget     depth[MAX_SWAPCHAIN_IMAGES];      // per-image depth
+  
     RenderTarget     hdr_color[MAX_SWAPCHAIN_IMAGES];  // optional HDR buffer
+    RenderTarget     ldr_color[MAX_SWAPCHAIN_IMAGES];  // optional HDR buffer
+
+
     float            dt;
     double           cpu_frame_ns;
     double           cpu_active_ns;
@@ -589,7 +590,7 @@ void vk_create_swapchain(VkDevice                       device,
                          const FlowSwapchainCreateInfo* info,
                          VkQueue                        graphics_queue,
                          VkCommandPool                  one_time_pool,
-                         flow_id_pool*                  id_pool);
+                         Renderer*                      r);
 void vk_swapchain_destroy(VkDevice device, FlowSwapchain* swapchain, flow_id_pool* id_pool);
 
 void             vk_swapchain_recreate(VkDevice         device,
@@ -600,7 +601,7 @@ void             vk_swapchain_recreate(VkDevice         device,
                                        VkQueue          graphics_queue,
                                        VkCommandPool    one_time_pool,
 
-                                       flow_id_pool* id_pool);
+                                       Renderer* r);
 VkPresentModeKHR vk_swapchain_select_present_mode(VkPhysicalDevice physical_device, VkSurfaceKHR surface, bool vsync);
 
 
@@ -1051,12 +1052,14 @@ static FLOW_INLINE void frame_start(Renderer* renderer, Camera* cam)
         renderer->cpu_wait_accum_ns += (double)(time_now_ns() - wait_start);
 
         vk_swapchain_recreate(renderer->device, renderer->physical_device, &renderer->swapchain, fb_w, fb_h,
-                              renderer->graphics_queue, renderer->one_time_gfx_pool, &renderer->texture_pool);
+                              renderer->graphics_queue, renderer->one_time_gfx_pool, renderer);
 
         forEach(i, renderer->swapchain.image_count)
         {
             rt_resize(renderer, &renderer->depth[i], fb_w, fb_h);
+
             rt_resize(renderer, &renderer->hdr_color[i], fb_w, fb_h);
+            rt_resize(renderer, &renderer->ldr_color[i], fb_w, fb_h);
         }
 
 

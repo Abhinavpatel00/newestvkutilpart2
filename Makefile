@@ -46,7 +46,7 @@ BASE_CXXFLAGS := -std=c++17 -w -fno-common $(INCLUDES) \
 # Debug Flags
 # -----------------------------
 
-DEBUG_FLAGS := -O0 -g -ggdb -fno-omit-frame-pointer
+DEBUG_FLAGS := -O0 -g -ggdb -fno-omit-frame-pointer  -DDEBUG 
 
 # -----------------------------
 # Aggressive Release Flags

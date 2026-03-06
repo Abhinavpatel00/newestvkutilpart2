@@ -1,3 +1,25 @@
+HDR render target
+        ↓
+Compute shader (this)
+        ↓
+LDR texture
+        ↓
+Copy → swapchain
+        ↓
+Present
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 renderer_create
     create bindless layout

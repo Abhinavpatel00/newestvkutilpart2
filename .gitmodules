@@ -7,3 +7,6 @@
 [submodule "external/FastNoiseLite"]
 	path = external/FastNoiseLite
 	url = https://github.com/Auburn/FastNoiseLite.git
+[submodule "external/debugbreak"]
+	path = external/debugbreak
+	url = https://github.com/scottt/debugbreak.git

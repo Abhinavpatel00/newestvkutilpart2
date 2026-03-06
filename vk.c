@@ -1,13 +1,15 @@
 #include "vk.h"
 #include "flow/flow.h"
 #include "tinytypes.h"
+#include <assert.h>
+#include <signal.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <vulkan/vulkan_core.h>
 #include "external/SPIRV-Reflect/spirv_reflect.h"
-
-
+//             https://vulkan.org/user/pages/09.events/vulkanised-2023/vulkanised_2023_using_vulkan_validation_effectively.pdf
+#include "external/debugbreak/debugbreak.h"
 bool is_instance_extension_supported(const char* extension_name)
 {
     uint32_t extensionCount = 0;
@@ -47,10 +49,29 @@ bool is_instance_layer_supported(const char* layer_name)
     free(layers);
     return false;
 }
-static VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT      severity,
-                                                     VkDebugUtilsMessageTypeFlagsEXT             type,
-                                                     const VkDebugUtilsMessengerCallbackDataEXT* data,
-                                                     void*                                       user_data)
+
+#ifdef DEBUG
+#if __GNUC__
+#define ASSERT(c)                                                                                                      \
+    if(!(c))                                                                                                           \
+    __builtin_trap()
+#elif _MSC_VER
+#define ASSERT(c)                                                                                                      \
+    if(!(c))                                                                                                           \
+    __debugbreak()
+#else
+#define ASSERT(c)                                                                                                      \
+    if(!(c))                                                                                                           \
+    *(volatile int*)0 = 0
+#endif
+#else
+#define ASSERT(c)
+#endif
+
+VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT      severity,
+                                              VkDebugUtilsMessageTypeFlagsEXT             type,
+                                              const VkDebugUtilsMessengerCallbackDataEXT* data,
+                                              void*                                       user_data)
 {
     (void)type;
     (void)user_data;
@@ -67,7 +88,16 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(VkDebugUtilsMessageSeverity
     else if(severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT)
         tag = "VERBOSE";
 
+
     fprintf(stderr, "[VULKAN %s] %s\n", tag, data->pMessage);
+    if(severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
+    {
+        debug_break();
+    }
+
+    // {
+    //     raise(SIGTRAP);
+    // }
 
     return VK_FALSE;
 }
@@ -871,7 +901,6 @@ void renderer_create(Renderer* r, RendererDesc* desc)
     {
 
 
-#ifdef DEBUG
         //
         // 2. Debug Messenger
         //
@@ -885,37 +914,23 @@ void renderer_create(Renderer* r, RendererDesc* desc)
 
                                                      .pfnUserCallback = debug_callback};
 
-            PFN_vkCreateDebugUtilsMessengerEXT fn =
-                (void*)vkGetInstanceProcAddr(r->instance.instance, "vkCreateDebugUtilsMessengerEXT");
 
-            if(fn)
             {
-                fn(r->instance.instance, &ci, r->instance.allocatorcallbacks, &r->instance.debug_messenger);
+                vkCreateDebugUtilsMessengerEXT(r->instance.instance, &ci, r->instance.allocatorcallbacks, &r->instance.debug_messenger);
 
                 log_info("[renderer] debug messenger created");
 
-                PFN_vkSubmitDebugUtilsMessageEXT submit =
-                    (void*)vkGetInstanceProcAddr(r->instance.instance, "vkSubmitDebugUtilsMessageEXT");
-                if(submit)
+
                 {
                     VkDebugUtilsMessengerCallbackDataEXT data = {
                         .sType    = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CALLBACK_DATA_EXT,
                         .pMessage = "Validation is enabled and debug messenger is active",
                     };
-                    submit(r->instance.instance, VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT,
-                           VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT, &data);
+                    vkSubmitDebugUtilsMessageEXT(r->instance.instance, VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT,
+                                                 VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT, &data);
                 }
-                else
-                {
-                    log_warn("[renderer] vkSubmitDebugUtilsMessageEXT not available");
-                }
-            }
-            else
-            {
-                log_warn("[renderer] vkCreateDebugUtilsMessengerEXT not available");
             }
         }
-#endif
     }
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
@@ -1131,34 +1146,10 @@ void renderer_create(Renderer* r, RendererDesc* desc)
 
     int fb_w, fb_h;
     glfwGetFramebufferSize(r->window, &fb_w, &fb_h);
-    FlowSwapchainCreateInfo sci = {.surface         = r->surface,
-                                   .width           = fb_w,
-                                   .height          = fb_h,
-                                   .min_image_count = 3,
-
-                                   //.preferred_present_mode = VK_PRESENT_MODE_IMMEDIATE_KHR,
-                                   .preferred_format      = desc->swapchain_preferred_format,
-                                   .preferred_color_space = desc->swapchain_preferred_color_space,
-                                   .extra_usage           = desc->swapchain_extra_usage_flags,
-                                   .old_swapchain         = VK_NULL_HANDLE};
-
-    if(desc->swapchain_preferred_present_mode)
-    {
-
-        sci.preferred_present_mode = desc->swapchain_preferred_present_mode;
-    }
-    else
-    {
-        sci.preferred_present_mode = vk_swapchain_select_present_mode(r->physical_device, r->surface, desc->vsync);
-    }
-
-    vk_create_swapchain(r->device, r->physical_device, &r->swapchain, &sci, r->graphics_queue, r->one_time_gfx_pool,&r->texture_pool);
-
-
     //  descriptor_layout_cache_init(&r->descriptor_layout_cache);
     //pipeline_layout_cache_init(&r->pipeline_layout_cache);
     r->pipeline_cache = pipeline_cache_load_or_create(r->device, r->physical_device, "pipeline_cache.bin");
-   VkDescriptorSetLayoutBinding bindings[] = {// textures
+    VkDescriptorSetLayoutBinding bindings[] = {// textures
                                                {
                                                    .binding         = BINDLESS_TEXTURE_BINDING,
                                                    .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
@@ -1307,10 +1298,30 @@ void renderer_create(Renderer* r, RendererDesc* desc)
     };
 
     vkCreateDescriptorPool(r->device, &pool_info, NULL, &r->imgui_pool);
-    VkFormat depth_format = pick_depth_format(r->physical_device);
-    imgui_init(r->window, r->instance.instance, r->physical_device, r->device, r->graphics_queue_index,
-               r->graphics_queue, r->imgui_pool, r->swapchain.image_count, r->swapchain.image_count,
-               r->swapchain.format, depth_format, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+    VkFormat                depth_format = pick_depth_format(r->physical_device);
+    VkFormat                hdr_format   = VK_FORMAT_R16G16B16A16_SFLOAT;
+    FlowSwapchainCreateInfo sci          = {.surface         = r->surface,
+                                            .width           = fb_w,
+                                            .height          = fb_h,
+                                            .min_image_count = 3,
+
+                                            //.preferred_present_mode = VK_PRESENT_MODE_IMMEDIATE_KHR,
+                                            .preferred_format      = desc->swapchain_preferred_format,
+                                            .preferred_color_space = desc->swapchain_preferred_color_space,
+                                            .extra_usage           = desc->swapchain_extra_usage_flags,
+                                            .old_swapchain         = VK_NULL_HANDLE};
+
+    if(desc->swapchain_preferred_present_mode)
+    {
+
+        sci.preferred_present_mode = desc->swapchain_preferred_present_mode;
+    }
+    else
+    {
+        sci.preferred_present_mode = vk_swapchain_select_present_mode(r->physical_device, r->surface, desc->vsync);
+    }
+
+    vk_create_swapchain(r->device, r->physical_device, &r->swapchain, &sci, r->graphics_queue, r->one_time_gfx_pool, r);
 
 
     RenderTargetSpec depth_spec = {.width  = r->swapchain.extent.width,
@@ -1325,23 +1336,103 @@ void renderer_create(Renderer* r, RendererDesc* desc)
 
                                    .mip_count  = 1,
                                    .debug_name = "depth_buffer"};
-    RenderTargetSpec hdr_spec   = {.width  = r->swapchain.extent.width,
-                                   .height = r->swapchain.extent.height,
-                                   .layers = 1,
-                                   .format = VK_FORMAT_R16G16B16A16_SFLOAT,
-                                   .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
+    RenderTargetSpec hdr_spec   = {.width      = r->swapchain.extent.width,
+                                   .height     = r->swapchain.extent.height,
+                                   .layers     = 1,
+                                   .format     = hdr_format,
+                                   .usage      = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
                                    .mip_count  = 1,
                                    .debug_name = "hdr_color"};
+    RenderTargetSpec ldr_spec   = {.width  = r->swapchain.extent.width,
+                                   .height = r->swapchain.extent.height,
+                                   .layers = 1,
+
+                                   .format = VK_FORMAT_R8G8B8A8_UNORM,
+
+                                   .usage = VK_IMAGE_USAGE_STORAGE_BIT |       // compute writes tonemap result
+                                            VK_IMAGE_USAGE_TRANSFER_SRC_BIT |  // copy → swapchain
+                                            VK_IMAGE_USAGE_TRANSFER_DST_BIT |  // optional clears
+                                            VK_IMAGE_USAGE_SAMPLED_BIT,        // future post effects
+
+                                   .aspect = VK_IMAGE_ASPECT_COLOR_BIT,
+
+                                   .mip_count  = 1,
+                                   .debug_name = "ldr_color"};
+
+    imgui_init(r->window, r->instance.instance, r->physical_device, r->device, r->graphics_queue_index,
+               r->graphics_queue, r->imgui_pool, r->swapchain.image_count, r->swapchain.image_count, hdr_format,
+               depth_format, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
 
 
     forEach(i, r->swapchain.image_count)
     {
-
         rt_create(r, &r->depth[i], &depth_spec);
         rt_create(r, &r->hdr_color[i], &hdr_spec);
+        rt_create(r, &r->ldr_color[i], &ldr_spec);
     }
     {
-        r->dummy_texture = load_texture(r, "data/dummy_texture.png");
+        const char* path = "data/dummy_texture.png";
+
+
+        uint32_t       w, h, c;
+        unsigned char* pixels = stbi_load(path, &w, &h, &c, 4);
+        if(!pixels)
+        {
+            fprintf(stderr, "Failed to load %s\n", path);
+        }
+        TextureCreateDesc desc       = {.width     = w,
+                                        .height    = h,
+                                        .mip_count = 1,
+                                        .format    = VK_FORMAT_R8G8B8A8_UNORM,
+                                        .usage     = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_STORAGE_BIT};
+        TextureID  id         = create_texture(r, &desc);
+        Texture*          tex        = &r->textures[id];
+        VkDeviceSize      image_size = w * h * 4;
+        Buffer            staging;
+        create_buffer(r, image_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, &staging);
+        memcpy(staging.mapping, pixels, image_size);
+        stbi_image_free(pixels);
+        VkCommandBuffer      cmd      = vk_begin_one_time_cmd(r->device, r->one_time_gfx_pool);
+        VkImageMemoryBarrier barrier1 = {
+            .sType                       = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .oldLayout                   = VK_IMAGE_LAYOUT_UNDEFINED,
+            .newLayout                   = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            .srcAccessMask               = 0,
+            .dstAccessMask               = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .image                       = tex->image,
+            .subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .subresourceRange.levelCount = tex->mip_count,
+            .subresourceRange.layerCount = 1,
+        };
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0,
+                             NULL, 1, &barrier1);
+        VkBufferImageCopy region = {.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                                    .imageSubresource.layerCount = 1,
+                                    .imageExtent                 = {w, h, 1}};
+        vkCmdCopyBufferToImage(cmd, staging.buffer, tex->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        VkImageMemoryBarrier barrier2 = barrier1;
+        barrier2.oldLayout            = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier2.newLayout            = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier2.srcAccessMask        = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier2.dstAccessMask        = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0,
+                             NULL, 1, &barrier2);
+        vk_end_one_time_cmd(r->device, r->graphics_queue, r->one_time_gfx_pool, cmd);
+        destroy_buffer(r, &staging);
+
+	r->dummy_texture = id;
+    
+
+
+
+
+
+
+
+
+
+
+
     };
     {
         forEach(i, MAX_FRAMES_IN_FLIGHT)
@@ -1540,7 +1631,7 @@ void vk_create_swapchain(VkDevice                       device,
                          const FlowSwapchainCreateInfo* info,
                          VkQueue                        graphics_queue,
                          VkCommandPool                  one_time_pool,
-                         flow_id_pool*                  id_pool)
+                         Renderer*                      r)
 {
     VkSurfaceCapabilities2KHR caps = query_surface_capabilities(gpu, info->surface);
 
@@ -1602,7 +1693,41 @@ void vk_create_swapchain(VkDevice                       device,
         out_swapchain->states[i] =
             (ImageState){.layout = VK_IMAGE_LAYOUT_UNDEFINED, .stage = VK_PIPELINE_STAGE_2_NONE, .access = 0, .validity = IMAGE_STATE_UNDEFINED};
 
-        flow_id_pool_create_id(id_pool, &out_swapchain->bindless_index[i]);
+        flow_id_pool_create_id(&r->texture_pool, &out_swapchain->bindless_index[i]);
+
+        if(info->extra_usage & VK_IMAGE_USAGE_SAMPLED_BIT)
+        {
+            VkDescriptorImageInfo img = {.imageView   = out_swapchain->image_views[i],
+                                         .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+
+            VkWriteDescriptorSet write = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+
+                                          .dstSet          = r->bindless_system.set,
+                                          .dstBinding      = BINDLESS_TEXTURE_BINDING,
+                                          .dstArrayElement = out_swapchain->bindless_index[i],
+
+                                          .descriptorCount = 1,
+                                          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                                          .pImageInfo      = &img};
+
+            vkUpdateDescriptorSets(r->device, 1, &write, 0, NULL);
+        }
+        if(info->extra_usage & VK_IMAGE_USAGE_STORAGE_BIT)
+        {
+            VkDescriptorImageInfo img = {.imageView = out_swapchain->image_views[i], .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
+
+            VkWriteDescriptorSet write = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+
+                                          .dstSet     = r->bindless_system.set,
+                                          .dstBinding = BINDLESS_STORAGE_IMAGE_BINDING,
+
+                                          .dstArrayElement = out_swapchain->bindless_index[i],
+                                          .descriptorCount = 1,
+                                          .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                          .pImageInfo      = &img};
+
+            vkUpdateDescriptorSets(r->device, 1, &write, 0, NULL);
+        }
     }
     vk_create_semaphores(device, out_swapchain->image_count, out_swapchain->render_finished);
 }
@@ -1632,7 +1757,14 @@ void vk_swapchain_destroy(VkDevice device, FlowSwapchain* swapchain, flow_id_poo
 }
 
 
-void vk_swapchain_recreate(VkDevice device, VkPhysicalDevice gpu, FlowSwapchain* sc, uint32_t new_w, uint32_t new_h, VkQueue graphics_queue, VkCommandPool one_time_pool,flow_id_pool* id_pool)
+void vk_swapchain_recreate(VkDevice         device,
+                           VkPhysicalDevice gpu,
+                           FlowSwapchain*   sc,
+                           uint32_t         new_w,
+                           uint32_t         new_h,
+                           VkQueue          graphics_queue,
+                           VkCommandPool    one_time_pool,
+                           Renderer*        r)
 
 
 {
@@ -1661,7 +1793,7 @@ void vk_swapchain_recreate(VkDevice device, VkPhysicalDevice gpu, FlowSwapchain*
 
     VkSwapchainKHR old = sc->swapchain;
 
-    vk_create_swapchain(device, gpu, sc, &info, graphics_queue, one_time_pool,id_pool);
+    vk_create_swapchain(device, gpu, sc, &info, graphics_queue, one_time_pool, r);
 
     if(old)
         vkDestroySwapchainKHR(device, old, NULL);
@@ -2745,7 +2877,7 @@ bool rt_create(Renderer* r, RenderTarget* rt, const RenderTargetSpec* spec)
 
     if(spec->usage & VK_IMAGE_USAGE_SAMPLED_BIT)
     {
-        VkDescriptorImageInfo img = {.imageView = rt->view, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkDescriptorImageInfo img = {.imageView = rt->view, .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
 
         VkWriteDescriptorSet write = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
 
@@ -2784,7 +2916,7 @@ void rt_destroy(Renderer* r, RenderTarget* rt)
 {
     if(!r || !rt || !rt->image)
         return;
-
+    vkDeviceWaitIdle(r->device);
     uint32_t id = rt->bindless_index;
 
     if(id != UINT32_MAX)
