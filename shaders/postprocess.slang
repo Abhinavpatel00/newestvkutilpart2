@@ -72,6 +72,53 @@ bool has_flag(uint flags, uint bit)
 {
   return (flags & bit) != 0;
 }
+#define SLANG_DEFAULT(x) = (x)
+__intrinsic_op(cmpGT) public vector<bool, N> greaterThan<T, let N : int>(vector<T, N> x, vector<T, N> y);
+
+
+inline float3 toSrgb(float3 rgb)
+{
+  float3 low  = rgb * 12.92f;
+  float3 high = fma(pow(rgb, float3(1.0F / 2.4F)), float3(1.055F), float3(-0.055F));
+  return lerp(low, high, float3(greaterThan(rgb, float3(0.0031308F))));
+}
+
+// Converts a color from sRGB to linear RGB.
+inline float3 toLinear(float3 srgb)
+{
+  float3 low  = srgb / 12.92F;
+  float3 high = pow((srgb + float3(0.055F)) / 1.055F, float3(2.4F));
+  return lerp(low, high, float3(greaterThan(srgb, float3(0.04045F))));
+}
+
+/*-------------------------------------------------------------------------------------------------
+# Function `tonemapACES`
+> An approximation by Stephen Hill to the Academy Color Encoding System's
+> filmic curve for displaying HDR images on LDR output devices.
+
+From https://github.com/TheRealMJP/BakingLab/blob/master/BakingLab/ACES.hlsl,
+via https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/
+-------------------------------------------------------------------------------------------------*/
+inline float3 tonemapACES(float3 color)
+{
+  // Input transform
+  const float3x3 ACESInputMat = float3x3(0.59719F, 0.07600F, 0.02840F,   // Row 1
+                                         0.35458F, 0.90834F, 0.13383F,   // Row 2
+                                         0.04823F, 0.01566F, 0.83777F);  // Row 3
+  color                       = mul(color, ACESInputMat);
+
+  // RRT and ODT fit
+  float3 a = color * (color + float3(0.0245786F)) - float3(0.000090537F);
+  float3 b = color * (float3(0.983729F) * color + float3(0.4329510F)) + float3(0.238081F);
+  color    = a / b;  // Always OK because of the large constant term in b's polynomial
+  // Output transform
+  const float3x3 ACESOutputMat = float3x3(1.60475F, -0.10208F, -0.00327F,  //
+                                          -0.53108F, 1.10813F, -0.07276F,  //
+                                          -0.07367F, -0.00605F, 1.07602F);
+  color                        = mul(color, ACESOutputMat);
+  return color;
+}
+
 
 //===========================================================
 // Bindless resources
@@ -88,134 +135,6 @@ SamplerState samplers[];
 [[vk::binding(2, 0)]]
 RWTexture2D<float4> storage_images[];
 
-//===========================================================
-// Helper: white balance via simplified LMS transform
-//===========================================================
-float3 white_balance(float3 color, float temp, float tnt)
-{
-  float t1 = temp * 0.0553;
-  float t2 = tnt * 0.0553;
-  color.r *= 1.0 + t1;
-  color.b *= 1.0 - t1;
-  color.g *= 1.0 + t2;
-  return max(color, 0.0);
-}
-
-//===========================================================
-// Contrast (around midpoint 0.5 for LDR)
-//===========================================================
-float3 apply_contrast(float3 color, float contrast)
-{
-  const float mid = 0.5;
-  return (color - mid) * contrast + mid;
-}
-
-//===========================================================
-// Saturation
-//===========================================================
-float3 apply_saturation(float3 color, float saturation)
-{
-  float luma = dot(color, float3(0.2126, 0.7152, 0.0722));
-  return lerp(float3(luma), color, saturation);
-}
-
-//===========================================================
-// Lift / Gain  (shadows / highlights color adjustment)
-//===========================================================
-float3 apply_lift_gain(float3 color, float3 lift, float3 gain)
-{
-  return max(color * gain + lift, 0.0);
-}
-
-//===========================================================
-// Sepia
-//===========================================================
-float3 apply_sepia(float3 color, float intensity)
-{
-  float3 sepia;
-  sepia.r = dot(color, float3(0.393, 0.769, 0.189));
-  sepia.g = dot(color, float3(0.349, 0.686, 0.168));
-  sepia.b = dot(color, float3(0.272, 0.534, 0.131));
-  return lerp(color, sepia, intensity);
-}
-
-//===========================================================
-// Vignette
-//===========================================================
-float3 apply_vignette(float3 color, float2 uv, float intensity, float smoothness)
-{
-  float2 d        = uv - 0.5;
-  float  r2       = dot(d, d);  // 0 at center, ~0.5 at corners
-  float  vignette = 1.0 - r2 * intensity;
-  vignette        = clamp(vignette, 0.0, 1.0);
-  vignette        = pow(vignette, smoothness);
-  return color * vignette;
-}
-
-//===========================================================
-// Film grain (hash-based, temporal)
-//===========================================================
-float hash_grain(float2 p, float t)
-{
-  float3 p3 = frac(float3(p.xyx) * 0.1031);
-  p3 += dot(p3, p3.yzx + 33.33 + t);
-  return frac((p3.x + p3.y) * p3.z);
-}
-
-float3 apply_film_grain(float3 color, float2 uv, float time, float intensity)
-{
-  float noise        = hash_grain(uv * 1000.0, time * 0.01);
-  float luma         = dot(color, float3(0.2126, 0.7152, 0.0722));
-  float grain_weight = 1.0 - abs(luma * 2.0 - 1.0);
-  color += (noise - 0.5) * intensity * grain_weight;
-  return max(color, 0.0);
-}
-
-//===========================================================
-// 3x3 Unsharp-mask sharpen (reads from unmodified source)
-//===========================================================
-float3 apply_sharpen(Texture2D src, SamplerState samp, float2 uv, float2 texel, float strength, float3 center)
-{
-  float3 neighbors = float3(0);
-  neighbors += src.SampleLevel(samp, uv + float2(-texel.x, 0), 0).rgb;
-  neighbors += src.SampleLevel(samp, uv + float2(texel.x, 0), 0).rgb;
-  neighbors += src.SampleLevel(samp, uv + float2(0, -texel.y), 0).rgb;
-  neighbors += src.SampleLevel(samp, uv + float2(0, texel.y), 0).rgb;
-  neighbors *= 0.25;
-  return max(center + (center - neighbors) * strength, 0.0);
-}
-
-//===========================================================
-// Chromatic aberration (radial UV offset per channel)
-//===========================================================
-float3 apply_chromatic_aberration(Texture2D src, SamplerState samp, float2 uv, float2 resolution, float strength)
-{
-  float2 center_offset = uv - 0.5;
-  float2 offset        = center_offset * strength / resolution;
-
-  float r = src.SampleLevel(samp, uv + offset, 0).r;
-  float g = src.SampleLevel(samp, uv, 0).g;
-  float b = src.SampleLevel(samp, uv - offset, 0).b;
-  return float3(r, g, b);
-}
-
-//===========================================================
-// Interleaved gradient noise dithering (absolute last)
-//===========================================================
-float interleaved_gradient_noise(float2 p)
-{
-  float3 magic = float3(0.06711056, 0.00583715, 52.9829189);
-  return frac(magic.z * frac(dot(p, magic.xy)));
-}
-
-float3 apply_dithering(float3 color, float2 pixel_coord, float strength)
-{
-  float dither = interleaved_gradient_noise(pixel_coord);
-  return color + (dither - 0.5) * strength / 255.0;
-}
-
-
-
 [numthreads(16, 16, 1)]
 void cs_main(uint3 id: SV_DispatchThreadID)
 {
@@ -227,16 +146,9 @@ void cs_main(uint3 id: SV_DispatchThreadID)
   Texture2D           src = textures[push.src_texture_id];
   RWTexture2D<float4> dst = storage_images[push.output_image_id];
 
-  // read HDR color
   float3 color = src.Load(int3(pix, 0)).rgb;
-
-  // exposure
-  ///////color *= push.exposure;
-
-  // ACES tonemap
-  //color = aces(color);
-//color = pow(max(color, 0.0), 1.0 / 2.2);
-  // write
+  color        = tonemapACES(color);
+  //color = pow(max(color, 0.0), 1.0 / 2.2);
   dst[pix] = float4(color, 1.0);
 }
 

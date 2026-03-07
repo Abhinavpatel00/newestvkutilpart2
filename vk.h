@@ -71,10 +71,28 @@ typedef struct VkPhysicalDeviceShaderNonSemanticInfoFeaturesKHR
 typedef uint32_t TextureID;
 typedef struct
 {
-    VkInstance instance;
+    VkInstance               instance;
     VkDebugUtilsMessengerEXT debug_messenger;
-    VkAllocationCallbacks* allocatorcallbacks;
+    VkAllocationCallbacks*   allocatorcallbacks;
 } InstanceContext;
+
+
+typedef uint32_t SamplerID;
+typedef enum DefaultSamplerID
+{
+    SAMPLER_LINEAR_WRAP = 0,
+    SAMPLER_LINEAR_CLAMP,
+    SAMPLER_NEAREST_WRAP,
+    SAMPLER_NEAREST_CLAMP,
+    SAMPLER_LINEAR_WRAP_ANISO,
+    SAMPLER_SHADOW,
+    SAMPLER_COUNT
+} DefaultSamplerID;
+
+typedef struct DefaultSamplerTable
+{
+    SamplerID samplers[SAMPLER_COUNT];
+} DefaultSamplerTable;
 
 
 typedef struct
@@ -339,19 +357,19 @@ typedef struct
 
     Frustum          frustum;
     VkDescriptorPool imgui_pool;
-    RenderTarget     depth[MAX_SWAPCHAIN_IMAGES];      // per-image depth
-  
-    RenderTarget     hdr_color[MAX_SWAPCHAIN_IMAGES];  // optional HDR buffer
-    RenderTarget     ldr_color[MAX_SWAPCHAIN_IMAGES];  // optional HDR buffer
+    RenderTarget     depth[MAX_SWAPCHAIN_IMAGES];  // per-image depth
+
+    RenderTarget hdr_color[MAX_SWAPCHAIN_IMAGES];  // optional HDR buffer
+    RenderTarget ldr_color[MAX_SWAPCHAIN_IMAGES];  // optional HDR buffer
 
 
-    float            dt;
-    double           cpu_frame_ns;
-    double           cpu_active_ns;
-    double           cpu_wait_ns;
-    double           cpu_wait_accum_ns;
-    double           cpu_prev_frame;
-    GpuProfiler      gpuprofiler[MAX_FRAMES_IN_FLIGHT];
+    float       dt;
+    double      cpu_frame_ns;
+    double      cpu_active_ns;
+    double      cpu_wait_ns;
+    double      cpu_wait_accum_ns;
+    double      cpu_prev_frame;
+    GpuProfiler gpuprofiler[MAX_FRAMES_IN_FLIGHT];
 
 
     InstanceContext  instance;
@@ -381,12 +399,13 @@ typedef struct
 
     DeviceInfo info;
 
-    VkPipelineCache pipeline_cache;
-    flow_id_pool    texture_pool;
-    flow_id_pool    sampler_pool;
-    Texture         textures[MAX_BINDLESS_TEXTURES];  // reference by textureid
-    VkSampler       sampler[MAX_BINDLESS_SAMPLERS];   // reference by textureid
-    TextureID       dummy_texture;
+    VkPipelineCache     pipeline_cache;
+    flow_id_pool        texture_pool;
+    flow_id_pool        sampler_pool;
+    DefaultSamplerTable default_samplers;
+    Texture             textures[MAX_BINDLESS_TEXTURES];  // reference by textureid
+    VkSampler           samplers[MAX_BINDLESS_SAMPLERS];   // reference by samplerid
+    TextureID           dummy_texture;
 } Renderer;
 
 typedef struct BufferPool
@@ -769,7 +788,6 @@ void      destroy_texture(Renderer* r, TextureID id);
 
 TextureID load_texture(Renderer* r, const char* path);
 
-typedef uint32_t SamplerID;
 
 typedef struct
 {
@@ -1117,4 +1135,45 @@ static FLOW_INLINE void submit_frame(Renderer* r)
     uint64_t wait_start = time_now_ns();
     vk_swapchain_present(r->present_queue, &r->swapchain, &r->swapchain.render_finished[r->swapchain.current_image], 1);
     r->cpu_wait_accum_ns += (double)(time_now_ns() - wait_start);
+}
+
+
+FORCE_INLINE bool sampler_create(Renderer* r,
+                           const VkSamplerCreateInfo* ci,
+                           uint32_t* out_sampler_id)
+{
+    if(!r || !ci || !out_sampler_id)
+        return false;
+
+    VkSampler sampler = VK_NULL_HANDLE;
+
+    VkResult res = vkCreateSampler(r->device, ci, NULL, &sampler);
+    if(res != VK_SUCCESS)
+        return false;
+
+    uint32_t id;
+    if(!flow_id_pool_create_id(&r->sampler_pool, &id))
+    {
+        vkDestroySampler(r->device, sampler, NULL);
+        return false;
+    }
+
+    r->samplers[id] = sampler;
+
+    *out_sampler_id = id;
+
+    VkDescriptorImageInfo sampler_info = {.sampler = r->samplers[id]};
+
+    VkWriteDescriptorSet write = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+
+                                  .dstSet          = r->bindless_system.set,
+                                  .dstBinding      = BINDLESS_SAMPLER_BINDING,
+                                  .dstArrayElement = id,
+
+                                  .descriptorCount = 1,
+                                  .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLER,
+                                  .pImageInfo      = &sampler_info};
+
+    vkUpdateDescriptorSets(r->device, 1, &write, 0, NULL);
+    return true;
 }

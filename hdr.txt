@@ -39,3 +39,314 @@ void main(void) {
     vec4 src = texture2D(iChannel0, uv);
     color = vec4( uchimura(src.xyz), src.a);
 }
+
+
+
+| Buffer   | Format                          | Why                 |
+| -------- | ------------------------------- | ------------------- |
+| Albedo   | `R8G8B8A8_UNORM`                | color               |
+| Normal   | `R16G16_SNORM` or `R10G10B10A2` | compressed normal   |
+| Material | `R8G8B8A8_UNORM`                | roughness/metalness |
+| Emissive | `R11G11B10_FLOAT`               | HDR emissive        |
+| Depth    | `D32_SFLOAT`                    | reused              |
+
+
+CPU SIDE
+========
+
+Frame Start
+    |
+    v
+Update Camera / Input
+    |
+    v
+Generate Terrain (Perlin)
+    |
+    v
+Build Chunk Mesh (PackedFace buffer)
+    |
+    v
+Upload Mesh + Indirect Draw + Textures
+    |
+    v
+Begin Command Buffer
+
+
+GPU SIDE
+========
+
+Image Layout Transitions
+------------------------
+Depth        -> DEPTH_ATTACHMENT_OPTIMAL
+HDR Color    -> COLOR_ATTACHMENT_OPTIMAL
+Swapchain    -> GENERAL
+
+
+MAIN GRAPHICS PASS (Forward Rendering)
+--------------------------------------
+
+            +-------------------------+
+            |  TRIANGLE PIPELINE      |
+            |  (voxel shader)         |
+            +-----------+-------------+
+                        |
+                        v
+
+Inputs
+------
+PackedFace buffer (SSBO)
+Bindless voxel textures
+Camera view_proj
+Sampler
+Push constants
+
+
+Output Targets
+--------------
++-----------------------------+
+| HDR Scene Color             |
+| Format: R16G16B16A16_FLOAT  |
++-----------------------------+
+
++-----------------------------+
+| Depth Buffer                |
+| Format: D32_FLOAT           |
++-----------------------------+
+
+
+UI PASS
+-------
+
+ImGui draw data
+    |
+    v
+Blended onto HDR color buffer
+
+
+POST PROCESS (Compute)
+======================
+
+HDR Image Transition
+COLOR_ATTACHMENT -> GENERAL
+
+
+        +------------------------+
+        |  COMPUTE PIPELINE      |
+        |  POSTPROCESS           |
+        +-----------+------------+
+                    |
+                    v
+
+Compute Shader
+--------------
+HDR color
+    |
+    v
+Tonemap
+    |
+    v
+Gamma correction
+    |
+    v
+Write LDR image
+
+
+Output
+------
+
++----------------------------+
+| LDR Color Buffer           |
+| Format: R8G8B8A8_UNORM     |
++----------------------------+
+
+
+
+TRANSFER TO SWAPCHAIN
+=====================
+
+LDR Color
+GENERAL -> TRANSFER_SRC
+
+Swapchain
+GENERAL -> TRANSFER_DST
+
+
+vkCmdBlitImage
+--------------
+
+LDR Buffer
+    |
+    v
+Swapchain Image
+
+
+
+PRESENT
+=======
+
+Swapchain Layout
+TRANSFER_DST -> PRESENT_SRC_KHR
+
+Queue Submit
+    |
+    v
+Frame Presented
+
+
+
+FULL FRAME PIPELINE
+===================
+
+Frame Start
+   |
+   v
+Camera Update
+   |
+   v
+Terrain Generation
+   |
+   v
+Chunk Mesh Build
+   |
+   v
+Upload Mesh Buffer
+   |
+   v
+Begin Command Buffer
+   |
+   v
+Forward Render Pass (voxels -> HDR)
+   |
+   v
+Render ImGui
+   |
+   v
+Compute Tonemap (HDR -> LDR)
+   |
+   v
+Blit LDR -> Swapchain
+   |
+   v
+Present Frame
+
+
+
+
+
+
+Image Layout Transitions
+------------------------
+Depth        -> DEPTH_ATTACHMENT_OPTIMAL
+HDR Color    -> COLOR_ATTACHMENT_OPTIMAL
+Swapchain    -> GENERAL
+
+MAIN GRAPHICS PASS ()
+--------------------------------------
+
+            +-------------------------+
+            |  MESH PIPELINE          |
+            |  (simple voxel shader)  |
+            +-----------+-------------+
+                        |
+                        v
+
+Inputs
+------
+PackedFace buffer (SSBO)
+Bindless voxel textures
+etc ..
+
+Output Targets
+--------------
++-----------------------------+
+| HDR Scene Color             |
+| Format: R16G16B16A16_FLOAT  |
++-----------------------------+
+
++-----------------------------+
+| Depth Buffer                |
+| Format: D32_FLOAT           |
++-----------------------------+
+
+
+UI PASS
+-------
+
+ImGui draw data
+    |
+    v
+Blended onto HDR color buffer
+
+
+POST PROCESS (Compute)
+======================
+
+HDR Image Transition
+COLOR_ATTACHMENT -> GENERAL
+
+
+        +------------------------+
+        |  COMPUTE PIPELINE      |
+        |  POSTPROCESS           |
+        +-----------+------------+
+                    |
+                    v
+
+Compute Shader(for post process)
+--------------
+HDR color (VK_FORMAT_R16G16B16A16_SFLOAT)
+    |
+    v
+Tonemap
+    |
+    v
+Write LDR image
+
+
+Output
+------
+
++----------------------------+
+| LDR Color image           |
+| Format: R8G8B8A8_UNORM     |
++----------------------------+
+
+
+
+TRANSFER TO SWAPCHAIN
+=====================
+
+LDR Color
+GENERAL -> TRANSFER_SRC
+
+Swapchain
+GENERAL -> TRANSFER_DST
+
+
+vkCmdBlitImage
+--------------
+
+LDR IMAGE(.format = VK_FORMAT_R8G8B8A8_UNORM)
+
+    |
+    v
+Swapchain Image(.format = VK_FORMAT_R8G8B8A8_SRGB)
+
+
+
+
+PRESENT
+=======
+
+Swapchain Layout
+TRANSFER_DST -> PRESENT_SRC_KHR
+
+Queue Submit
+    |
+    v
+Frame Presented
+
+
+
+
+

@@ -1429,6 +1429,69 @@ void renderer_create(Renderer* r, RendererDesc* desc)
                               desc->enable_pipeline_stats && r->info.feature_chain.core.features.pipelineStatisticsQuery);
         }
     }
+
+
+    memset(&r->default_samplers, 0, sizeof(r->default_samplers));
+
+    {
+        DefaultSamplerTable* table = &r->default_samplers;
+
+
+        VkSamplerCreateInfo ci = {
+            .sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            .magFilter    = VK_FILTER_LINEAR,
+            .minFilter    = VK_FILTER_LINEAR,
+            .mipmapMode   = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+            .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+            .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+            .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+            .minLod       = 0.0f,
+            .maxLod       = VK_LOD_CLAMP_NONE,
+        };
+
+        // Linear wrap
+        sampler_create(r, &ci, &table->samplers[SAMPLER_LINEAR_WRAP]);
+
+        // Linear clamp
+        ci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        ci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        ci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sampler_create(r, &ci, &table->samplers[SAMPLER_LINEAR_CLAMP]);
+
+        // Nearest wrap
+        ci.magFilter    = VK_FILTER_NEAREST;
+        ci.minFilter    = VK_FILTER_NEAREST;
+        ci.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        ci.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        ci.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        sampler_create(r, &ci, &table->samplers[SAMPLER_NEAREST_WRAP]);
+
+        // Nearest clamp
+        ci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        ci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        ci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sampler_create(r, &ci, &table->samplers[SAMPLER_NEAREST_CLAMP]);
+
+        // Anisotropic wrap
+        ci.magFilter        = VK_FILTER_LINEAR;
+        ci.minFilter        = VK_FILTER_LINEAR;
+        ci.addressModeU     = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        ci.addressModeV     = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        ci.addressModeW     = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        ci.anisotropyEnable = VK_TRUE;
+        ci.maxAnisotropy    = 16.0f;
+        sampler_create(r, &ci, &table->samplers[SAMPLER_LINEAR_WRAP_ANISO]);
+
+        // Shadow sampler
+        ci.anisotropyEnable = VK_FALSE;
+        ci.compareEnable    = VK_TRUE;
+        ci.compareOp        = VK_COMPARE_OP_LESS_OR_EQUAL;
+        ci.addressModeU     = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        ci.addressModeV     = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        ci.addressModeW     = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        ci.borderColor      = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+        sampler_create(r, &ci, &table->samplers[SAMPLER_SHADOW]);
+    }
 }
 
 void renderer_destroy(Renderer* r)
@@ -2682,9 +2745,9 @@ SamplerID create_sampler(Renderer* r, const SamplerCreateDesc* desc)
                                 .minLod = 0.0f,
                                 .maxLod = desc->max_lod};
 
-    VK_CHECK(vkCreateSampler(r->device, &info, r->allocatorcallbacks, &r->sampler[id]));
+    VK_CHECK(vkCreateSampler(r->device, &info, r->allocatorcallbacks, &r->samplers[id]));
 
-    VkDescriptorImageInfo sampler_info = {.sampler = r->sampler[id]};
+    VkDescriptorImageInfo sampler_info = {.sampler = r->samplers[id]};
 
     VkWriteDescriptorSet write = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
 
@@ -2703,14 +2766,14 @@ SamplerID create_sampler(Renderer* r, const SamplerCreateDesc* desc)
 
 void destroy_sampler(Renderer* r, SamplerID id)
 {
-    VkSampler sampler = r->sampler[id];
+    VkSampler sampler = r->samplers[id];
 
     if(!sampler)
         return;
 
     vkDestroySampler(r->device, sampler, r->allocatorcallbacks);
 
-    r->sampler[id] = VK_NULL_HANDLE;
+    r->samplers[id] = VK_NULL_HANDLE;
 
     flow_id_pool_destroy_id(&r->sampler_pool, id);
 }

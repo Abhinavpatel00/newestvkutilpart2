@@ -19,6 +19,7 @@
 #define PAD(name, size) uint8_t name[(size)]
 // imp gpu validation shows false positives may be bacause of data races
 
+
 typedef struct
 {
     float pos[3];
@@ -84,13 +85,21 @@ typedef struct
     uint16_t face_tex[6];
 } VoxelMaterial;
 
-
 enum
 {
     TEX_STONE,
     TEX_GRASS_TOP,
     TEX_GRASS_SIDE,
     TEX_DIRT,
+
+    TEX_BRICKS,
+    TEX_COBBLESTONE,
+    TEX_SAND,
+    TEX_OAK_PLANKS,
+    TEX_BEDROCK,
+    TEX_DIAMOND_BLOCK,
+    TEX_OBSIDIAN,
+
     TEX_COUNT
 };
 typedef enum
@@ -104,25 +113,44 @@ typedef enum
 } FaceDir;
 typedef enum
 {
-
     VOXEL_AIR = 0,
     STONE,
-    GRASS
+    GRASS,
+    BRICK,
+    COBBLE,
+    SAND,
+    PLANKS,
+    BEDROCK,
+    DIAMOND,
+    OBSIDIAN,
+
+    VOXEL_COUNT
 } VoxelType;
+
+
+
 VoxelMaterial voxel_materials[] = {
-    [VOXEL_AIR] = {0, 0, 0, 0, 0, 0},
+    [VOXEL_AIR] = {0},
 
-    [STONE] = {.face_tex =
-                   {
-                       TEX_STONE,  // +X
-                       TEX_STONE,  // -X
-                       TEX_STONE,  // +Y
-                       TEX_STONE,  // -Y
-                       TEX_STONE,  // +Z
-                       TEX_STONE   // -Z
-                   }},
+    [STONE] = {.face_tex = {TEX_STONE, TEX_STONE, TEX_STONE, TEX_STONE, TEX_STONE, TEX_STONE}},
 
-    [GRASS] = {.face_tex = {TEX_GRASS_SIDE, TEX_GRASS_SIDE, TEX_GRASS_TOP, TEX_DIRT, TEX_GRASS_SIDE, TEX_GRASS_SIDE}}};
+    [GRASS] = {.face_tex = {TEX_GRASS_SIDE, TEX_GRASS_SIDE, TEX_GRASS_TOP, TEX_DIRT, TEX_GRASS_SIDE, TEX_GRASS_SIDE}},
+
+    [BRICK] = {.face_tex = {TEX_BRICKS, TEX_BRICKS, TEX_BRICKS, TEX_BRICKS, TEX_BRICKS, TEX_BRICKS}},
+
+    [COBBLE] = {.face_tex = {TEX_COBBLESTONE, TEX_COBBLESTONE, TEX_COBBLESTONE, TEX_COBBLESTONE, TEX_COBBLESTONE, TEX_COBBLESTONE}},
+
+    [SAND] = {.face_tex = {TEX_SAND, TEX_SAND, TEX_SAND, TEX_SAND, TEX_SAND, TEX_SAND}},
+
+    [PLANKS] = {.face_tex = {TEX_OAK_PLANKS, TEX_OAK_PLANKS, TEX_OAK_PLANKS, TEX_OAK_PLANKS, TEX_OAK_PLANKS, TEX_OAK_PLANKS}},
+
+    [BEDROCK] = {.face_tex = {TEX_BEDROCK, TEX_BEDROCK, TEX_BEDROCK, TEX_BEDROCK, TEX_BEDROCK, TEX_BEDROCK}},
+
+    [DIAMOND] = {.face_tex = {TEX_DIAMOND_BLOCK, TEX_DIAMOND_BLOCK, TEX_DIAMOND_BLOCK, TEX_DIAMOND_BLOCK,
+                              TEX_DIAMOND_BLOCK, TEX_DIAMOND_BLOCK}},
+
+    [OBSIDIAN] = {.face_tex = {TEX_OBSIDIAN, TEX_OBSIDIAN, TEX_OBSIDIAN, TEX_OBSIDIAN, TEX_OBSIDIAN, TEX_OBSIDIAN}},
+};
 typedef struct
 {
     uint32_t data0;
@@ -255,9 +283,9 @@ int main()
 
             .swapchain_preferred_color_space = VK_COLORSPACE_SRGB_NONLINEAR_KHR,
             .swapchain_preferred_format      = VK_FORMAT_B8G8R8A8_UNORM,
-            .swapchain_extra_usage_flags = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
-            .vsync               = false,
-            .enable_debug_printf = false,  // Enable shader debug printf
+            .swapchain_extra_usage_flags     = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            .vsync                           = false,
+            .enable_debug_printf             = false,  // Enable shader debug printf
 
             .bindless_sampled_image_count     = 65536,
             .bindless_sampler_count           = 256,
@@ -304,8 +332,21 @@ int main()
     voxel_textures[TEX_GRASS_SIDE] = load_texture(&renderer, "/home/lk/myprojects/flowgame/data/PNG/Tiles/gravel_dirt.png");
 
     voxel_textures[TEX_DIRT] = load_texture(&renderer, "/home/lk/myprojects/flowgame/data/PNG/Tiles/dirt.png");
+    voxel_textures[TEX_BRICKS] = load_texture(&renderer, "data/voxeltextures/GoodVibes/minecraft/textures/block/bricks.png");
 
+    voxel_textures[TEX_COBBLESTONE] =
+        load_texture(&renderer, "data/voxeltextures/GoodVibes/minecraft/textures/block/cobblestone.png");
 
+    voxel_textures[TEX_SAND] = load_texture(&renderer, "data/voxeltextures/GoodVibes/minecraft/textures/block/sand.png");
+
+    voxel_textures[TEX_OAK_PLANKS] = load_texture(&renderer, "data/voxeltextures/GoodVibes/minecraft/textures/block/oak_planks.png");
+
+    voxel_textures[TEX_BEDROCK] = load_texture(&renderer, "data/voxeltextures/GoodVibes/minecraft/textures/block/bedrock.png");
+
+    voxel_textures[TEX_DIAMOND_BLOCK] =
+        load_texture(&renderer, "data/voxeltextures/GoodVibes/minecraft/textures/block/diamond_block.png");
+
+    voxel_textures[TEX_OBSIDIAN] = load_texture(&renderer, "data/voxeltextures/GoodVibes/minecraft/textures/block/obsidian.png");
     SamplerCreateDesc desc = {.mag_filter = VK_FILTER_LINEAR,
                               .min_filter = VK_FILTER_LINEAR,
 
@@ -316,7 +357,6 @@ int main()
                               .max_lod     = 1.0f};
 
     SamplerID linear_sampler = create_sampler(&renderer, &desc);
-
 
     BufferSlice indirect_slice = buffer_pool_alloc(&pool, sizeof(VkDrawIndirectCommand), 16);
     BufferSlice count_slice    = buffer_pool_alloc(&pool, sizeof(uint32_t), 4);
@@ -356,10 +396,43 @@ int main()
 
             for(int y = 0; y < height; y++)
             {
-                if(y == height - 1)
-                    chunk.voxels[x][y][z].type = GRASS;
-                else
-                    chunk.voxels[x][y][z].type = STONE;
+                uint32_t r = squirrel_noise5(x + z * 1234, 1337) % 9;
+
+                VoxelType type;
+
+                switch(r)
+                {
+                    case 0:
+                        type = STONE;
+                        break;
+                    case 1:
+                        type = BRICK;
+                        break;
+                    case 2:
+                        type = COBBLE;
+                        break;
+                    case 3:
+                        type = SAND;
+                        break;
+                    case 4:
+                        type = PLANKS;
+                        break;
+                    case 5:
+                        type = DIAMOND;
+                        break;
+                    case 6:
+                        type = GRASS;
+
+                        break;
+                    case 7:
+                        type = BEDROCK;
+                        break;
+                    case 8:
+                        type = OBSIDIAN;
+                        break;
+                }
+
+                chunk.voxels[x][y][z].type = type;
             }
         }
 
@@ -498,7 +571,7 @@ int main()
             igText("FPS: %.1f", cpu_frame_ms > 0.0 ? 1000.0 / cpu_frame_ms : 0.0);
 
             igSeparator();
-                    igSeparator();
+            igSeparator();
 
             igText("Camera Position");
             igText("x: %.3f", cam.position[0]);
@@ -577,14 +650,53 @@ int main()
 
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, render_pipelines.pipelines[POSTPROCESS_PIPELINE]);
 
-                    PostPush pp_push            = {0};
-            pp_push.src_texture_id      = renderer.hdr_color[renderer.swapchain.current_image].bindless_index;
-            pp_push.output_image_id     = renderer.ldr_color[renderer.swapchain.current_image].bindless_index;
-            pp_push.sampler_id          = linear_sampler;
-            pp_push.width               = renderer.swapchain.extent.width;
-            pp_push.height              = renderer.swapchain.extent.height;
-            pp_push.frame               = pp_frame_counter++;
+            PostPush pp_push        = {0};
+            pp_push.src_texture_id  = renderer.hdr_color[renderer.swapchain.current_image].bindless_index;
+            pp_push.output_image_id = renderer.ldr_color[renderer.swapchain.current_image].bindless_index;
+            pp_push.sampler_id      = linear_sampler;
+            pp_push.width           = renderer.swapchain.extent.width;
+            pp_push.height          = renderer.swapchain.extent.height;
+            pp_push.frame           = pp_frame_counter++;
             vkCmdPushConstants(cmd, renderer.bindless_system.pipeline_layout, VK_SHADER_STAGE_ALL, 0, sizeof(PostPush), &pp_push);
 
             uint32_t gx = (pp_push.width + 15) / 16;
             uint32_t gy = (pp_push.height + 15) / 16;
+
+
+            vkCmdDispatch(cmd, gx, gy, 1);
+        }
+        rt_transition_all(cmd, &renderer.ldr_color[renderer.swapchain.current_image], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                          VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+        image_transition_swapchain(renderer.frames[renderer.current_frame].cmdbuf, &renderer.swapchain,
+                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_TRANSFER_BIT, 0);
+
+        VkImageBlit blit = {
+            .srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
+            .srcOffsets = {{0, 0, 0}, {renderer.swapchain.extent.width, renderer.swapchain.extent.height, 1}},
+
+            .dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
+            .dstOffsets = {{0, 0, 0}, {renderer.swapchain.extent.width, renderer.swapchain.extent.height, 1}}};
+
+        vkCmdBlitImage(cmd, renderer.ldr_color[renderer.swapchain.current_image].image,
+                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, renderer.swapchain.images[renderer.swapchain.current_image],
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
+
+        image_transition_swapchain(renderer.frames[renderer.current_frame].cmdbuf, &renderer.swapchain,
+                                   VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, 0);
+
+
+        vk_cmd_end(renderer.frames[renderer.current_frame].cmdbuf);
+
+
+        submit_frame(&renderer);
+    }
+
+
+    printf("Push size = %zu\n", sizeof(Push));
+    printf("view_proj offset = %zu\n", offsetof(Push, view_proj));
+    printf(" pushis %zu    ", alignof(Push));
+    printf(" renderer size is %zu", sizeof(Renderer));
+    //    ANALYZE_STRUCT(ImageState);
+    //renderer_destroy(&renderer);
+    return 0;
+}
