@@ -20,6 +20,7 @@
 // imp gpu validation shows false positives may be bacause of data races
 
 
+static bool voxel_debug = true;
 typedef struct
 {
     float pos[3];
@@ -84,6 +85,7 @@ uint32_t squirrel_noise5(int position, uint32_t seed)
 typedef struct
 {
     const char* face_tex[6];
+    const char* debug_name;
 } VoxelMaterial;
 typedef enum
 {
@@ -94,39 +96,224 @@ typedef enum
     FACE_POS_Z = 4,
     FACE_NEG_Z = 5
 } FaceDir;
+
 typedef enum
 {
     VOXEL_AIR = 0,
+
+    // terrain
     STONE,
     GRASS,
-    BRICK,
-    COBBLE,
+    DIRT,
     SAND,
-    PLANKS,
-    BEDROCK,
-    DIAMOND,
+    GRAVEL,
+    CLAY,
+
+    // stone variants
+    COBBLESTONE,
+    MOSSY_COBBLESTONE,
+    STONE_BRICKS,
+    CRACKED_STONE_BRICKS,
+
+    // ores
+    COAL_ORE,
+    IRON_ORE,
+    GOLD_ORE,
+    DIAMOND_ORE,
+    REDSTONE_ORE,
+    EMERALD_ORE,
+
+    // blocks
+    COAL_BLOCK,
+    IRON_BLOCK,
+    GOLD_BLOCK,
+    DIAMOND_BLOCK,
+    EMERALD_BLOCK,
+
+    // wood
+    OAK_LOG,
+    BIRCH_LOG,
+    SPRUCE_LOG,
+    JUNGLE_LOG,
+    ACACIA_LOG,
+    DARK_OAK_LOG,
+
+    OAK_PLANKS,
+    BIRCH_PLANKS,
+    SPRUCE_PLANKS,
+    JUNGLE_PLANKS,
+    ACACIA_PLANKS,
+    DARK_OAK_PLANKS,
+
+    // leaves
+    OAK_LEAVES,
+    BIRCH_LEAVES,
+    SPRUCE_LEAVES,
+    JUNGLE_LEAVES,
+    ACACIA_LEAVES,
+    DARK_OAK_LEAVES,
+
+    // decorative
+    BRICKS,
+    BOOKSHELF,
+    CRAFTING_TABLE,
+    FURNACE,
+    TNT,
+
+    // minerals
     OBSIDIAN,
+    BEDROCK,
 
     VOXEL_COUNT
+
 } VoxelType;
 
-VoxelMaterial voxel_materials[VOXEL_COUNT] = {
-    [VOXEL_AIR] = {0},
+// +X → side
+// -X → side
+// +Z → side
+// -Z → side
+// +Y → top
+// -Y → bottom
+//
 
-    [STONE] = {.face_tex = {"data/block/stone.png", "data/block/stone.png", "data/block/stone.png",
-                            "data/block/stone.png", "data/block/stone.png", "data/block/stone.png"}},
+// clang-format off
 
-    [GRASS] = {.face_tex = {"data/block/grass_side.png", "data/block/grass_side.png", "data/block/grass_top.png",
-                            "data/block/dirt.png", "data/block/grass_side.png", "data/block/grass_side.png"}},
+#define CUBE(tex) {tex, tex, tex, tex, tex, tex}
+#define TOP_BOTTOM(side, top, bottom) \
+{side, side, top, bottom, side, side}
+VoxelMaterial voxel_materials[VOXEL_COUNT] =
+{
 
-    [BRICK] = {.face_tex = {"data/block/bricks.png", "data/block/bricks.png", "data/block/bricks.png",
-                            "data/block/bricks.png", "data/block/bricks.png", "data/block/bricks.png"}},
+[VOXEL_AIR] =
+{
+    .debug_name = "AIR"
+},
 
-    [COBBLE] = {.face_tex = {"data/block/cobblestone.png", "data/block/cobblestone.png", "data/block/cobblestone.png",
-                             "data/block/cobblestone.png", "data/block/cobblestone.png", "data/block/cobblestone.png"}},
+// terrain
 
-    [SAND] = {.face_tex = {"data/block/sand.png", "data/block/sand.png", "data/block/sand.png", "data/block/sand.png",
-                           "data/block/sand.png", "data/block/sand.png"}}};
+[STONE] = { .face_tex = CUBE("data/block/stone.png"), .debug_name = "STONE" },
+[GRASS] = {
+
+	.face_tex = TOP_BOTTOM(
+        "data/block/grass_block_side.png",
+        "data/block/grass_block_top.png",
+        "data/block/dirt.png"
+    ),
+    .debug_name = "GRASS"
+},
+[DIRT] =
+{
+    .face_tex =
+    CUBE  (  "data/block/dirt.png")
+,.debug_name = "DIRT"
+},
+
+[SAND] =
+{
+    .face_tex =
+    {
+        "data/block/sand.png",
+        "data/block/sand.png",
+        "data/block/sand.png",
+        "data/block/sand.png",
+        "data/block/sand.png",
+        "data/block/sand.png"
+    },
+    .debug_name = "SAND"
+},
+
+[GRAVEL] =
+{
+    .face_tex =
+    {
+        "data/block/gravel.png",
+        "data/block/gravel.png",
+        "data/block/gravel.png",
+        "data/block/gravel.png",
+        "data/block/gravel.png",
+        "data/block/gravel.png"
+    },
+    .debug_name = "GRAVEL"
+},
+
+// wood example
+
+[OAK_LOG] =
+{
+    .face_tex =
+    {
+        "data/block/oak_log.png",
+        "data/block/oak_log.png",
+        "data/block/oak_log_top.png",
+        "data/block/oak_log_top.png",
+        "data/block/oak_log.png",
+        "data/block/oak_log.png"
+    },
+    .debug_name = "OAK_LOG"
+},
+
+[OAK_PLANKS] =
+{
+    .face_tex =
+    {
+        "data/block/oak_planks.png",
+        "data/block/oak_planks.png",
+        "data/block/oak_planks.png",
+        "data/block/oak_planks.png",
+        "data/block/oak_planks.png",
+        "data/block/oak_planks.png"
+    },
+    .debug_name = "OAK_PLANKS"
+},
+
+// blocks
+
+[BRICKS] =
+{
+    .face_tex =
+    {
+        "data/block/bricks.png",
+        "data/block/bricks.png",
+        "data/block/bricks.png",
+        "data/block/bricks.png",
+        "data/block/bricks.png",
+        "data/block/bricks.png"
+    },
+    .debug_name = "BRICKS"
+},
+
+[OBSIDIAN] =
+{
+    .face_tex =
+    {
+        "data/block/obsidian.png",
+        "data/block/obsidian.png",
+        "data/block/obsidian.png",
+        "data/block/obsidian.png",
+        "data/block/obsidian.png",
+        "data/block/obsidian.png"
+    },
+    .debug_name = "OBSIDIAN"
+},
+
+[BEDROCK] =
+{
+    .face_tex =
+    {
+        "data/block/bedrock.png",
+        "data/block/bedrock.png",
+        "data/block/bedrock.png",
+        "data/block/bedrock.png",
+        "data/block/bedrock.png",
+        "data/block/bedrock.png"
+    },
+    .debug_name = "BEDROCK"
+},
+
+};
+
+
+// clang-format on
 
 typedef struct
 {
@@ -203,7 +390,7 @@ TextureID get_texture(Renderer* r, const char* path)
 }
 
 static TextureID block_textures[VOXEL_COUNT][6];
-void build_chunk_mesh(Chunk* chunk, ChunkMesh* mesh)
+void             build_chunk_mesh(Chunk* chunk, ChunkMesh* mesh)
 {
     mesh->face_count = 0;
 
@@ -217,33 +404,37 @@ void build_chunk_mesh(Chunk* chunk, ChunkMesh* mesh)
                     continue;
 
                 if(is_air(chunk, x + 1, y, z))
-                    mesh->faces[mesh->face_count++] =
-                        pack_face(x, y, z, FACE_POS_X, block_textures[v.type][FACE_POS_X]);
+                    mesh->faces[mesh->face_count++] = pack_face(x, y, z, FACE_POS_X, block_textures[v.type][FACE_POS_X]);
 
                 if(is_air(chunk, x - 1, y, z))
-                    mesh->faces[mesh->face_count++] =
-                        pack_face(x, y, z, FACE_NEG_X, block_textures[v.type][FACE_NEG_X]);
+                    mesh->faces[mesh->face_count++] = pack_face(x, y, z, FACE_NEG_X, block_textures[v.type][FACE_NEG_X]);
 
                 if(is_air(chunk, x, y + 1, z))
-                    mesh->faces[mesh->face_count++] =
-                        pack_face(x, y, z, FACE_POS_Y, block_textures[v.type][FACE_POS_Y]);
+                    mesh->faces[mesh->face_count++] = pack_face(x, y, z, FACE_POS_Y, block_textures[v.type][FACE_POS_Y]);
 
                 if(is_air(chunk, x, y - 1, z))
-                    mesh->faces[mesh->face_count++] =
-                        pack_face(x, y, z, FACE_NEG_Y, block_textures[v.type][FACE_NEG_Y]);
+                    mesh->faces[mesh->face_count++] = pack_face(x, y, z, FACE_NEG_Y, block_textures[v.type][FACE_NEG_Y]);
 
                 if(is_air(chunk, x, y, z + 1))
-                    mesh->faces[mesh->face_count++] =
-                        pack_face(x, y, z, FACE_POS_Z, block_textures[v.type][FACE_POS_Z]);
+                    mesh->faces[mesh->face_count++] = pack_face(x, y, z, FACE_POS_Z, block_textures[v.type][FACE_POS_Z]);
 
                 if(is_air(chunk, x, y, z - 1))
-                    mesh->faces[mesh->face_count++] =
-                        pack_face(x, y, z, FACE_NEG_Z, block_textures[v.type][FACE_NEG_Z]);
+                    mesh->faces[mesh->face_count++] = pack_face(x, y, z, FACE_NEG_Z, block_textures[v.type][FACE_NEG_Z]);
             }
 }
 
 void init_block_textures(Renderer* r)
 {
+    TextureID fallback = get_texture(r, "data/dummy_texture.png");
+
+    for(int b = 0; b < VOXEL_COUNT; b++)
+    {
+        for(int f = 0; f < 6; f++)
+        {
+            block_textures[b][f] = fallback;
+        }
+    }
+
     for(int b = 0; b < VOXEL_COUNT; b++)
     {
         for(int f = 0; f < 6; f++)
@@ -262,6 +453,22 @@ float terrain(float x, float z)
                                  0.5f,  // gain
                                  6      // octaves
     );
+}
+
+
+void build_debug_voxel_palette(Chunk* chunk)
+{
+    memset(chunk, 0, sizeof(*chunk));
+
+    int cols = 6;
+
+    for(int t = 1; t < VOXEL_COUNT; t++)
+    {
+        int x = (t % cols) * 2;
+        int z = (t / cols) * 2;
+
+        chunk->voxels[x][0][z].type = (VoxelType)t;
+    }
 }
 int main()
 {
@@ -299,10 +506,11 @@ int main()
             .height = 749,
 
             .swapchain_preferred_color_space = VK_COLORSPACE_SRGB_NONLINEAR_KHR,
-            .swapchain_preferred_format      = VK_FORMAT_B8G8R8A8_UNORM,
-            .swapchain_extra_usage_flags     = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-            .vsync                           = false,
-            .enable_debug_printf             = false,  // Enable shader debug printf
+            .swapchain_preferred_format      = VK_FORMAT_B8G8R8A8_SRGB,
+            .swapchain_extra_usage_flags     = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
+                                           | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,  // src for reading raw pixels
+            .vsync               = false,
+            .enable_debug_printf = false,  // Enable shader debug printf
 
             .bindless_sampled_image_count     = 65536,
             .bindless_sampler_count           = 256,
@@ -314,7 +522,7 @@ int main()
 
 
         renderer_create(&renderer, &desc);
-init_block_textures(&renderer);
+        init_block_textures(&renderer);
         GraphicsPipelineConfig cfg = pipeline_config_default();
         cfg.vert_path              = "compiledshaders/triangle.vert.spv";
         cfg.frag_path              = "compiledshaders/triangle.frag.spv";
@@ -340,15 +548,15 @@ init_block_textures(&renderer);
                      VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT, 2048);
 
     VkBufferDeviceAddressInfo addrInfo = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = pool.buffer};
-    TextureID        tex_id = load_texture(&renderer, "/home/lk/myprojects/flowgame/data/PNG/Tiles/greystone.png");
-    SamplerCreateDesc desc = {.mag_filter = VK_FILTER_LINEAR,
-                              .min_filter = VK_FILTER_LINEAR,
+    TextureID         tex_id = load_texture(&renderer, "/home/lk/myprojects/flowgame/data/PNG/Tiles/greystone.png");
+    SamplerCreateDesc desc   = {.mag_filter = VK_FILTER_LINEAR,
+                                .min_filter = VK_FILTER_LINEAR,
 
-                              .address_u   = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-                              .address_v   = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-                              .address_w   = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-                              .mipmap_mode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
-                              .max_lod     = 1.0f};
+                                .address_u   = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+                                .address_v   = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+                                .address_w   = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+                                .mipmap_mode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+                                .max_lod     = 1.0f};
 
     SamplerID linear_sampler = create_sampler(&renderer, &desc);
 
@@ -361,11 +569,12 @@ init_block_textures(&renderer);
 
     /* device address */
 
-
     Camera cam = {
-        .position   = {27.0f, 50.0f, 50.0f},
-        .yaw        = glm_rad(180.0f),
-        .pitch      = glm_rad(-15.0f),
+
+
+        .position   = {11.0f, 3.3f, 8.6f},
+        .yaw        = glm_rad(5.7f),
+        .pitch      = glm_rad(0.0f),
         .move_speed = 3.0f,
         .look_speed = 0.0025f,
         .fov_y      = glm_rad(75.0f),
@@ -376,59 +585,36 @@ init_block_textures(&renderer);
     };
 
     glfwSetInputMode(renderer.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-    static Chunk chunk = {0};
-
-    for(int x = 0; x < CHUNK_SIZE; x++)
-        for(int z = 0; z < CHUNK_SIZE; z++)
-        {
-            float n = terrain(x, z);
-            n       = n * 0.5f + 0.5f;
-
-            int height = (int)(n * (CHUNK_SIZE - 1));
-            height     = glm_clamp(height, 1, CHUNK_SIZE - 1);
 
 
-            for(int y = 0; y < height; y++)
+    static Chunk           chunk            = {0};
+    static const VoxelType terrain_voxels[] = {STONE, SAND, GRASS, BEDROCK, OBSIDIAN};
+    if(voxel_debug)
+    {
+        build_debug_voxel_palette(&chunk);
+    }
+    else
+    {
+        for(int x = 0; x < CHUNK_SIZE; x++)
+            for(int z = 0; z < CHUNK_SIZE; z++)
             {
-                uint32_t r = squirrel_noise5(x + z * 1234, 1337) % 9;
+                float n = terrain(x, z);
+                n       = n * 0.5f + 0.5f;
 
-                VoxelType type;
+                int height = (int)(n * (CHUNK_SIZE - 1));
+                height     = glm_clamp(height, 1, CHUNK_SIZE - 1);
 
-                switch(r)
+                uint32_t r = squirrel_noise5(x + z * 1234, 1337) % ARRAY_COUNT(terrain_voxels);
+
+                VoxelType type = terrain_voxels[r];
+                for(int y = 0; y < height; y++)
                 {
-                    case 0:
-                        type = STONE;
-                        break;
-                    case 1:
-                        type = BRICK;
-                        break;
-                    case 2:
-                        type = COBBLE;
-                        break;
-                    case 3:
-                        type = SAND;
-                        break;
-                    case 4:
-                        type = PLANKS;
-                        break;
-                    case 5:
-                        type = DIAMOND;
-                        break;
-                    case 6:
-                        type = GRASS;
+                    uint32_t r = squirrel_noise5(x + z * 1234, 1337) % ARRAY_COUNT(terrain_voxels);
 
-                        break;
-                    case 7:
-                        type = BEDROCK;
-                        break;
-                    case 8:
-                        type = OBSIDIAN;
-                        break;
+                    chunk.voxels[x][y][z].type = terrain_voxels[r];
                 }
-
-                chunk.voxels[x][y][z].type = type;
             }
-        }
+    }
 
 
     ChunkMesh mesh;
@@ -666,6 +852,36 @@ init_block_textures(&renderer);
                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, renderer.swapchain.images[renderer.swapchain.current_image],
                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
 
+        VkBufferImageCopy region = {
+            .bufferOffset      = 0,
+            .bufferRowLength   = 0,
+            .bufferImageHeight = 0,
+
+            .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
+
+            .imageOffset = {0, 0, 0},
+
+            .imageExtent = {renderer.swapchain.extent.width,
+                            1,  // copy only the first row for debugging
+                            1}};
+        // for reading pixel image
+        image_transition_swapchain(renderer.frames[renderer.current_frame].cmdbuf, &renderer.swapchain,
+                                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_TRANSFER_BIT, 0);
+
+
+        Buffer readback;
+
+        create_buffer(&renderer, renderer.swapchain.extent.width * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                      VMA_MEMORY_USAGE_AUTO_PREFER_HOST, &readback);
+
+        vkCmdCopyImageToBuffer(cmd, renderer.swapchain.images[renderer.swapchain.current_image],
+
+
+                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.buffer, 1, &region);
+
+        uint8_t* data = readback.mapping;
+
+
         image_transition_swapchain(renderer.frames[renderer.current_frame].cmdbuf, &renderer.swapchain,
                                    VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, 0);
 
@@ -674,6 +890,14 @@ init_block_textures(&renderer);
 
 
         submit_frame(&renderer);
+
+
+
+
+        for(int i = 0; i < 8; i++)
+        {
+            printf("%u %u %u\n", data[i * 4 + 0], data[i * 4 + 1], data[i * 4 + 2]);
+        }
     }
 
 

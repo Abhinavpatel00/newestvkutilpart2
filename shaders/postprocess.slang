@@ -146,9 +146,12 @@ void cs_main(uint3 id: SV_DispatchThreadID)
   Texture2D           src = textures[push.src_texture_id];
   RWTexture2D<float4> dst = storage_images[push.output_image_id];
 
-  float3 color = src.Load(int3(pix, 0)).rgb;
-  color        = tonemapACES(color);
+  //float3 color = src.Load(int3(pix, 0)).rgb;
+  //  color        = tonemapACES(color);
   //color = pow(max(color, 0.0), 1.0 / 2.2);
+  // linear test color
+  float3 color = float3(0.5, 0.5, 0.5);
+
   dst[pix] = float4(color, 1.0);
 }
 

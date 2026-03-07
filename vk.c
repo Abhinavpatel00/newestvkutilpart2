@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <vulkan/vulkan_core.h>
 #include "external/SPIRV-Reflect/spirv_reflect.h"
 //             https://vulkan.org/user/pages/09.events/vulkanised-2023/vulkanised_2023_using_vulkan_validation_effectively.pdf
@@ -1389,7 +1390,8 @@ void renderer_create(Renderer* r, RendererDesc* desc)
         Texture*          tex        = &r->textures[id];
         VkDeviceSize      image_size = w * h * 4;
         Buffer            staging;
-        create_buffer(r, image_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, &staging);
+        create_buffer(r, image_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,  VMA_MEMORY_USAGE_AUTO_PREFER_HOST, &staging);
+
         memcpy(staging.mapping, pixels, image_size);
         stbi_image_free(pixels);
         VkCommandBuffer      cmd      = vk_begin_one_time_cmd(r->device, r->one_time_gfx_pool);
@@ -2514,7 +2516,6 @@ VkPresentModeKHR vk_swapchain_select_present_mode(VkPhysicalDevice physical_devi
 
     return best;
 }
-
 bool create_buffer(Renderer* r, VkDeviceSize size, VkBufferUsageFlags usage, VmaMemoryUsage memory_usage, Buffer* out)
 {
     VkBufferCreateInfo buffer_info = {
@@ -2523,17 +2524,25 @@ bool create_buffer(Renderer* r, VkDeviceSize size, VkBufferUsageFlags usage, Vma
         .usage       = usage,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
     };
+VmaAllocationCreateInfo alloc_info = {
+    .usage = memory_usage,
+    .flags =
+        VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+        VMA_ALLOCATION_CREATE_MAPPED_BIT
+};
 
-    VmaAllocationCreateInfo alloc_info = {.usage = memory_usage};
 
     if(vmaCreateBuffer(r->vmaallocator, &buffer_info, &alloc_info, &out->buffer, &out->allocation, NULL) != VK_SUCCESS)
     {
         return false;
     }
-
     out->buffer_size = size;
+    out->mapping     = NULL;
 
-    vmaMapMemory(r->vmaallocator, out->allocation, (void**)&out->mapping);
+    VmaAllocationInfo info;
+    vmaGetAllocationInfo(r->vmaallocator, out->allocation, &info);
+
+        out->mapping = info.pMappedData;
 
     if(usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT)
     {
@@ -2541,16 +2550,20 @@ bool create_buffer(Renderer* r, VkDeviceSize size, VkBufferUsageFlags usage, Vma
 
         out->address = vkGetBufferDeviceAddress(r->device, &addr_info);
     }
+    else
+    {
+        out->address = 0;
+    }
 
     return true;
 }
+
 
 void destroy_buffer(Renderer* r, Buffer* b)
 {
     if(!b->buffer)
         return;
 
-    vmaUnmapMemory(r->vmaallocator, b->allocation);
     vmaDestroyBuffer(r->vmaallocator, b->buffer, b->allocation);
 
     memset(b, 0, sizeof(*b));
