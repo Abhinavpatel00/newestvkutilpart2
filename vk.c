@@ -2619,7 +2619,7 @@ TextureID load_texture(Renderer* r, const char* path)
     TextureCreateDesc desc       = {.width     = w,
                                     .height    = h,
                                     .mip_count = 1,
-                                    .format    = VK_FORMAT_R8G8B8A8_UNORM,
+                                    .format    = VK_FORMAT_R8G8B8A8_SRGB,
                                     .usage     = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT};
     TextureID         id         = create_texture(r, &desc);
     Texture*          tex        = &r->textures[id];

@@ -1,15 +1,16 @@
-HDR render target
+HDR render target   VK_FORMAT_R16G16B16A16_SFLOAT;
         ↓
 Compute shader (this)
         ↓
-LDR texture
+LDR texture UNORM
         ↓
-Copy → swapchain
+Copy → swapchain UNORM
         ↓
 Present
 
 
-
+Load SRGB images w/ VK_FORMAT_R8G8B8A8_SRGB
+Load LINEAR images w/ VK_FORMAT_R8G8B8A8_UNORM
 
 
 

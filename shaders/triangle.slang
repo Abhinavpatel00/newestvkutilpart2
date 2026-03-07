@@ -106,8 +106,10 @@ float4 fs_main(VSOutput input) : SV_Target0
 {
     Texture2D tex = textures[NonUniformResourceIndex(input.tex_id)];
     SamplerState samp = samplers[push.sampler_id];
-    float4 c = tex.Sample(samp, input.uv);
+float3 albedo = tex.Sample(samp, input.uv).rgb;
 
+
+return float4(albedo,1);
 #if DEBUG_PRINTF
     if(input.uv.x < 0.02 && input.uv.y < 0.02)
     {
@@ -115,5 +117,4 @@ float4 fs_main(VSOutput input) : SV_Target0
     }
 #endif
 
-    return c;
 }
