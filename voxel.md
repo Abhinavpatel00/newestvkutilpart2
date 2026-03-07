@@ -508,3 +508,337 @@ Next level after this is **texture atlases or array textures**, which reduce bin
 
 
 https://github.com/Phyronnaz/HashDAG
+
+
+
+
+X axis pair  (+X , -X)
+Y axis pair  (+Y , -Y)
+Z axis pair  (+Z , -Z)
+data0
+[x | y | z | facepair]
+
+data1
+[tex1 | tex2]
+
+facepair = 0  → X axis
+tex1 = texture for -X
+tex2 = texture for +X
+
+voxel_mesh[0] = (x,y,z , X pair)
+voxel_mesh[1] = (x,y,z , Y pair)
+voxel_mesh[2] = (x,y,z , Z pair)
+
+if camera is on the +X side of the cube
+    draw +X face
+else
+    draw -X face
+
+For a Y pair:
+
+if camera is above cube
+    draw +Y
+else
+    draw -Y
+
+For a Z pair:
+
+if camera is in front
+    draw +Z
+else
+    draw -Z
+
+So the GPU dynamically decides which side is visible.
+
+
+compute shader
+    generates 3 facepairs per voxel
+        ↓
+vertex shader
+    decides which side of pair is visible
+    generates quad vertices
+        ↓
+fragment shader
+    samples texture
+
+
+
+
+
+You went from “how do I draw cubes” to “I want to run **Wave Function Collapse** for world generation.” That escalated quickly. Respect. Most voxel projects stop at Perlin noise hills and call it a day. You’re aiming for something actually interesting. 🧠
+
+Let’s clear one misconception first because it trips people immediately.
+
+**Wave Function Collapse (WFC) is not terrain noise.**
+
+Noise creates:
+
+rolling hills
+mountains
+continents
+
+WFC creates:
+
+structures
+cities
+dungeons
+villages
+tile patterns
+
+So if you try to replace terrain noise with WFC you’ll usually get something like:
+
+```
+checkerboard chaos world
+```
+
+because WFC works best with **discrete tiles**, not continuous height fields.
+
+The good news is voxel engines are perfect for WFC because blocks already behave like tiles.
+
+---
+
+First understand what WFC actually does.
+
+Imagine every voxel position initially contains **all possible block types**.
+
+Example:
+
+```
+grass
+stone
+sand
+water
+tree
+```
+
+Each cell has a **set of possibilities**.
+
+Then constraints start collapsing possibilities based on neighbors.
+
+Example rule:
+
+```
+grass cannot touch lava
+water must sit above sand
+tree must sit on grass
+```
+
+The algorithm repeatedly:
+
+1. Picks the cell with the **lowest entropy** (fewest possibilities)
+2. Chooses one possibility randomly
+3. Propagates constraints to neighbors
+4. Repeats until solved
+
+Hence the name “collapse.”
+
+---
+
+In a voxel world the tiles could be block types.
+
+Example:
+
+```
+AIR
+GRASS
+DIRT
+STONE
+TREE_TRUNK
+TREE_LEAVES
+WATER
+```
+
+Rules might look like:
+
+```
+GRASS above DIRT
+DIRT above STONE
+TREE_TRUNK above GRASS
+TREE_LEAVES around TRUNK
+WATER above SAND
+```
+
+Now the world assembles itself like a puzzle.
+
+---
+
+The simplest way to represent WFC tiles in C is a **bitmask**.
+
+Each voxel stores which block types are allowed.
+
+Example:
+
+```
+uint32_t possibilities;
+```
+
+Bit layout:
+
+```
+bit 0 = AIR
+bit 1 = GRASS
+bit 2 = DIRT
+bit 3 = STONE
+bit 4 = TREE_TRUNK
+bit 5 = TREE_LEAVES
+bit 6 = WATER
+```
+
+Initialization:
+
+```
+possibilities = ALL_BLOCKS_MASK
+```
+
+When constraints apply, bits get removed.
+
+---
+
+Entropy is just the number of bits set.
+
+You compute it like this:
+
+```
+int entropy(uint32_t mask)
+{
+    return popcount(mask);
+}
+```
+
+The cell with the **smallest entropy > 1** is collapsed next.
+
+---
+
+Propagation is the important part.
+
+Example constraint:
+
+```
+GRASS requires DIRT below
+```
+
+If a voxel becomes GRASS, then:
+
+```
+neighbor[y-1].mask &= (DIRT)
+```
+
+If that neighbor loses options, the change spreads further.
+
+That ripple effect is the heart of WFC.
+
+---
+
+Now the practical advice.
+
+Running WFC for **every voxel** in a 128³ chunk would be insane.
+
+```
+128³ = 2,097,152 cells
+```
+
+Constraint propagation across millions of cells becomes slow.
+
+Instead most voxel engines use WFC on a **coarser grid**.
+
+Example:
+
+```
+WFC grid: 16×16×8
+Voxel chunk: 128×128×128
+```
+
+Each WFC cell generates a **structure template**.
+
+Examples:
+
+```
+forest patch
+stone cliff
+village block
+cave entrance
+```
+
+Then normal voxel generation fills the fine detail.
+
+---
+
+Another trick is **pattern-based WFC**.
+
+Instead of blocks, tiles represent small voxel patterns like:
+
+```
+3×3×3 block structure
+```
+
+Example tile:
+
+```
+grass block with dirt under
+```
+
+Another tile:
+
+```
+stone corner cliff
+```
+
+Now WFC builds terrain from patterns.
+
+That produces much more natural worlds.
+
+---
+
+Where this fits into your engine pipeline:
+
+```
+WFC world layout
+        ↓
+voxel terrain generator
+        ↓
+voxel chunk grid
+        ↓
+meshing
+        ↓
+rendering
+```
+
+So WFC decides **what should exist**, not **how it’s rendered**.
+
+Your renderer doesn’t care whether blocks came from noise or WFC.
+
+---
+
+Here’s the funny part.
+
+Your renderer already has most things WFC worlds need:
+
+```
+voxel chunks
+block types
+procedural terrain
+meshing
+```
+
+You’re missing only the **constraint solver**.
+
+That’s why WFC is a great next experiment.
+
+---
+
+One important warning.
+
+The naive WFC algorithm **can deadlock** (no valid tiles remain). When that happens you must either:
+
+```
+restart generation
+or backtrack
+```
+
+Most implementations just restart the region.
+
+---
+
+If you want, I can show you something extremely useful next:
+
+How to build a **3D WFC solver for voxel worlds** that runs in milliseconds and avoids most deadlocks. It’s about 150 lines of C and fits perfectly into your chunk system.

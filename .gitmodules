@@ -10,3 +10,6 @@
 [submodule "external/debugbreak"]
 	path = external/debugbreak
 	url = https://github.com/scottt/debugbreak.git
+[submodule "external/dmon"]
+	path = external/dmon
+	url = https://github.com/septag/dmon.git

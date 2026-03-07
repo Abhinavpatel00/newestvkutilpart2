@@ -9,8 +9,10 @@
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <string.h>
 #include <vulkan/vulkan_core.h>
 #include "stb/stb_perlin.h"
+#include "voxel.h"
 #define VALIDATION true
 #define KB(x) ((x) * 1024ULL)
 #define MB(x) ((x) * 1024ULL * 1024ULL)
@@ -18,460 +20,221 @@
 #define PAD(name, size) uint8_t name[(size)]
 // imp gpu validation shows false positives may be bacause of data races
 
-
-static bool voxel_debug     = true;
+#define DMON_IMPL
+#include "external/dmon/dmon.h"
+static bool voxel_debug     = false;
 static bool take_screenshot = true;
 typedef struct
 {
     float pos[3];
     float uv[2];
 } Vertex;
-// make a single header noise library with slang and c for cpu and gpu
-
-// whatare these GPU uniform block
-// Cluster grid
-// Culling results buffer
-// light buffer
-// camera state and input state in renderer may be and upload to uniform
-// Light culling buffers
-//Scene lifetime state:
-// • Scene graph
-// • BVH
-// • Static meshes
-// • GPUBufferArena
-//• LightSystem
-//
-//    Frame lifetime state:
-// • Camera matrices
-// • Frustum
-// • Visible object list
-// • Command buffers
-// Renderer lifetime state:
-// • GPU infrastructure
-// • Resource caches and pools
-// • Frame contexts
 typedef enum PipelineID
 {
-    TRIANGLE_PIPELINE,
-    POSTPROCESS_PIPELINE,
+    PIPELINE_FULLSCREEN,
+    PIPELINE_POSTPROCESS,
+    PIPELINE_TRIANGLE_TEST,
+
     PIPELINE_COUNT
 } PipelineID;
-typedef struct RenderPipelines
+
+typedef enum PipelineType
 {
-    VkPipeline pipelines[PIPELINE_COUNT];
+    PIPELINE_TYPE_GRAPHICS,
+    PIPELINE_TYPE_COMPUTE
+} PipelineType;
+
+typedef struct PipelineEntry
+{
+    PipelineType type;
+
+    union
+    {
+        GraphicsPipelineConfig graphics;
+
+        struct
+        {
+            const char* path;
+        } compute;
+    };
+
+    bool dirty;
+
+} PipelineEntry;
+typedef struct RendererPipelines
+{
+    VkPipeline    pipelines[PIPELINE_COUNT];
+    PipelineEntry entries[PIPELINE_COUNT];
+
 } RendererPipelines;
-uint32_t squirrel_noise5(int position, uint32_t seed)
+
+
+static RendererPipelines render_pipelines;
+static uint32_t          current_pipeline_build;
+
+static void spv_to_slang(const char* spv, char* out)
 {
-    const uint32_t BIT_NOISE1 = 0xd2a80a3f;
-    const uint32_t BIT_NOISE2 = 0xa884f197;
-    const uint32_t BIT_NOISE3 = 0x6c736f4b;
+    const char* name = strrchr(spv, '/');
+    name             = name ? name + 1 : spv;
 
-    uint32_t mangled = position;
-    mangled *= BIT_NOISE1;
-    mangled += seed;
-    mangled ^= (mangled >> 8);
-    mangled += BIT_NOISE2;
-    mangled ^= (mangled << 8);
-    mangled *= BIT_NOISE3;
-    mangled ^= (mangled >> 8);
+    char tmp[256];
+    strcpy(tmp, name);
 
-    return mangled;
+    char* stage = strstr(tmp, ".vert");
+    if(!stage)
+        stage = strstr(tmp, ".frag");
+    if(!stage)
+        stage = strstr(tmp, ".comp");
+
+    if(stage)
+        *stage = '\0';
+
+    sprintf(out, "shaders/%s.slang", tmp);
 }
-// Entity = ID
-// Component = data
-// System = logic
 
-
-typedef struct
+static const char* path_basename(const char* path)
 {
-    const char* face_tex[6];
-    const char* debug_name;
-} VoxelMaterial;
-typedef enum
-{
-    FACE_POS_X = 0,
-    FACE_NEG_X = 1,
-    FACE_POS_Y = 2,
-    FACE_NEG_Y = 3,
-    FACE_POS_Z = 4,
-    FACE_NEG_Z = 5
-} FaceDir;
-
-typedef enum
-{
-    VOXEL_AIR = 0,
-
-    // terrain
-    STONE,
-    GRASS,
-    DIRT,
-    SAND,
-    GRAVEL,
-    CLAY,
-
-    // stone variants
-    COBBLESTONE,
-    MOSSY_COBBLESTONE,
-    STONE_BRICKS,
-    CRACKED_STONE_BRICKS,
-
-    // ores
-    COAL_ORE,
-    IRON_ORE,
-    GOLD_ORE,
-    DIAMOND_ORE,
-    REDSTONE_ORE,
-    EMERALD_ORE,
-
-    // blocks
-    COAL_BLOCK,
-    IRON_BLOCK,
-    GOLD_BLOCK,
-    DIAMOND_BLOCK,
-    EMERALD_BLOCK,
-
-    // wood
-    OAK_LOG,
-    BIRCH_LOG,
-    SPRUCE_LOG,
-    JUNGLE_LOG,
-    ACACIA_LOG,
-    DARK_OAK_LOG,
-
-    OAK_PLANKS,
-    BIRCH_PLANKS,
-    SPRUCE_PLANKS,
-    JUNGLE_PLANKS,
-    ACACIA_PLANKS,
-    DARK_OAK_PLANKS,
-
-    // leaves
-    OAK_LEAVES,
-    BIRCH_LEAVES,
-    SPRUCE_LEAVES,
-    JUNGLE_LEAVES,
-    ACACIA_LEAVES,
-    DARK_OAK_LEAVES,
-
-    // decorative
-    BRICKS,
-    BOOKSHELF,
-    CRAFTING_TABLE,
-    FURNACE,
-    TNT,
-
-    // minerals
-    OBSIDIAN,
-    BEDROCK,
-
-    VOXEL_COUNT
-
-} VoxelType;
-
-// +X → side
-// -X → side
-// +Z → side
-// -Z → side
-// +Y → top
-// -Y → bottom
-//
-
-// clang-format off
-
-#define CUBE(tex) {tex, tex, tex, tex, tex, tex}
-#define TOP_BOTTOM(side, top, bottom) \
-{side, side, top, bottom, side, side}
-VoxelMaterial voxel_materials[VOXEL_COUNT] =
-{
-
-[VOXEL_AIR] =
-{
-    .debug_name = "AIR"
-},
-
-// terrain
-
-[STONE] = { .face_tex = CUBE("data/block/stone.png"), .debug_name = "STONE" },
-[GRASS] = {
-
-	.face_tex = TOP_BOTTOM(
-        "data/block/grass_block_side.png",
-        "data/block/grass_block_top.png",
-        "data/block/dirt.png"
-    ),
-    .debug_name = "GRASS"
-},
-[DIRT] =
-{
-    .face_tex =
-    CUBE  (  "data/block/dirt.png")
-,.debug_name = "DIRT"
-},
-
-[SAND] =
-{
-    .face_tex =
-    {
-        "data/block/sand.png",
-        "data/block/sand.png",
-        "data/block/sand.png",
-        "data/block/sand.png",
-        "data/block/sand.png",
-        "data/block/sand.png"
-    },
-    .debug_name = "SAND"
-},
-
-[GRAVEL] =
-{
-    .face_tex =
-    {
-        "data/block/gravel.png",
-        "data/block/gravel.png",
-        "data/block/gravel.png",
-        "data/block/gravel.png",
-        "data/block/gravel.png",
-        "data/block/gravel.png"
-    },
-    .debug_name = "GRAVEL"
-},
-
-// wood example
-
-[OAK_LOG] =
-{
-    .face_tex =
-    {
-        "data/block/oak_log.png",
-        "data/block/oak_log.png",
-        "data/block/oak_log_top.png",
-        "data/block/oak_log_top.png",
-        "data/block/oak_log.png",
-        "data/block/oak_log.png"
-    },
-    .debug_name = "OAK_LOG"
-},
-
-[OAK_PLANKS] =
-{
-    .face_tex =
-    {
-        "data/block/oak_planks.png",
-        "data/block/oak_planks.png",
-        "data/block/oak_planks.png",
-        "data/block/oak_planks.png",
-        "data/block/oak_planks.png",
-        "data/block/oak_planks.png"
-    },
-    .debug_name = "OAK_PLANKS"
-},
-
-// blocks
-
-[BRICKS] =
-{
-    .face_tex =
-    {
-        "data/block/bricks.png",
-        "data/block/bricks.png",
-        "data/block/bricks.png",
-        "data/block/bricks.png",
-        "data/block/bricks.png",
-        "data/block/bricks.png"
-    },
-    .debug_name = "BRICKS"
-},
-
-[OBSIDIAN] =
-{
-    .face_tex =
-    {
-        "data/block/obsidian.png",
-        "data/block/obsidian.png",
-        "data/block/obsidian.png",
-        "data/block/obsidian.png",
-        "data/block/obsidian.png",
-        "data/block/obsidian.png"
-    },
-    .debug_name = "OBSIDIAN"
-},
-
-[BEDROCK] =
-{
-    .face_tex =
-    {
-        "data/block/bedrock.png",
-        "data/block/bedrock.png",
-        "data/block/bedrock.png",
-        "data/block/bedrock.png",
-        "data/block/bedrock.png",
-        "data/block/bedrock.png"
-    },
-    .debug_name = "BEDROCK"
-},
-
-};
-
-
-// clang-format on
-
-typedef struct
-{
-    uint32_t data0;
-    uint32_t data1;
-} PackedFace;
-
-typedef struct
-{
-    VoxelType type;
-} Voxel;
-
-
-#define CHUNK_SIZE 128
-
-typedef struct
-{
-    Voxel voxels[CHUNK_SIZE][CHUNK_SIZE][CHUNK_SIZE];
-} Chunk;
-
-typedef struct
-{
-    PackedFace* faces;
-    uint32_t    face_count;
-} ChunkMesh;
-
-static inline PackedFace pack_face(uint32_t x, uint32_t y, uint32_t z, uint32_t face, uint32_t tex)
-{
-    PackedFace f;
-
-    f.data0 = (x & 255) | ((y & 255) << 8) | ((z & 4095) << 16) | ((face & 7) << 28);
-
-    f.data1 = tex;
-
-    return f;
+    const char* slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
 }
-static inline bool is_air(Chunk* c, int x, int y, int z)
+
+static bool shader_change_matches_spv(const char* changed, const char* spv)
 {
-    if(x < 0 || y < 0 || z < 0)
-        return true;
-    if(x >= CHUNK_SIZE)
-        return true;
-    if(y >= CHUNK_SIZE)
-        return true;
-    if(z >= CHUNK_SIZE)
+    if(!changed || !spv)
+        return false;
+
+    char slang[256];
+    spv_to_slang(spv, slang);
+
+    if(strstr(changed, slang))
         return true;
 
-    return c->voxels[x][y][z].type == VOXEL_AIR;
+    const char* changed_name = path_basename(changed);
+    const char* slang_name   = path_basename(slang);
+
+    return strcmp(changed_name, slang_name) == 0;
 }
-typedef struct
+
+VkPipeline create_graphics_pipeline_cache(Renderer* r, GraphicsPipelineConfig* cfg)
 {
-    const char* path;
-    TextureID   id;
-} TextureCacheEntry;
+    u32 id = current_pipeline_build;
 
-#define MAX_TEXTURES 512
+    PipelineEntry* e = &render_pipelines.entries[id];
 
-static TextureCacheEntry voxel_texture_cache[MAX_TEXTURES];
-uint32_t                 voxel_texture_cache_count = 0;
+    e->type     = PIPELINE_TYPE_GRAPHICS;
+    e->graphics = *cfg;
+    e->dirty    = false;
 
-TextureID get_texture(Renderer* r, const char* path)
+    VkPipeline p = create_graphics_pipeline(r, cfg);
+
+    render_pipelines.pipelines[id] = p;
+
+    current_pipeline_build++;
+
+    return p;
+}
+VkPipeline create_compute_pipeline_cache(Renderer* r, const char* path)
 {
-    for(uint32_t i = 0; i < voxel_texture_cache_count; i++)
+
+    u32 id = current_pipeline_build;
+
+    PipelineEntry* e = &render_pipelines.entries[id];
+
+    e->type         = PIPELINE_TYPE_COMPUTE;
+    e->compute.path = path;
+    e->dirty        = false;
+
+    VkPipeline p = create_compute_pipeline(r, path);
+
+    render_pipelines.pipelines[id] = p;
+
+    current_pipeline_build++;
+
+    return p;
+}
+
+void mark_pipelines_dirty(const char* changed)
+{
+    for(int i = 0; i < PIPELINE_COUNT; i++)
     {
-        if(strcmp(voxel_texture_cache[i].path, path) == 0)
-            return voxel_texture_cache[i].id;
-    }
+        PipelineEntry* e = &render_pipelines.entries[i];
 
-    TextureID id = load_texture(r, path);
+        if(e->type != PIPELINE_TYPE_GRAPHICS && e->type != PIPELINE_TYPE_COMPUTE)
+            continue;
 
-    voxel_texture_cache[voxel_texture_cache_count++] = (TextureCacheEntry){.path = path, .id = id};
+        bool matches = false;
 
-    return id;
-}
-
-static TextureID block_textures[VOXEL_COUNT][6];
-void             build_chunk_mesh(Chunk* chunk, ChunkMesh* mesh)
-{
-    mesh->face_count = 0;
-
-    for(int x = 0; x < CHUNK_SIZE; x++)
-        for(int y = 0; y < CHUNK_SIZE; y++)
-            for(int z = 0; z < CHUNK_SIZE; z++)
-            {
-                Voxel v = chunk->voxels[x][y][z];
-
-                if(v.type == VOXEL_AIR)
-                    continue;
-
-                if(is_air(chunk, x + 1, y, z))
-                    mesh->faces[mesh->face_count++] = pack_face(x, y, z, FACE_POS_X, block_textures[v.type][FACE_POS_X]);
-
-                if(is_air(chunk, x - 1, y, z))
-                    mesh->faces[mesh->face_count++] = pack_face(x, y, z, FACE_NEG_X, block_textures[v.type][FACE_NEG_X]);
-
-                if(is_air(chunk, x, y + 1, z))
-                    mesh->faces[mesh->face_count++] = pack_face(x, y, z, FACE_POS_Y, block_textures[v.type][FACE_POS_Y]);
-
-                if(is_air(chunk, x, y - 1, z))
-                    mesh->faces[mesh->face_count++] = pack_face(x, y, z, FACE_NEG_Y, block_textures[v.type][FACE_NEG_Y]);
-
-                if(is_air(chunk, x, y, z + 1))
-                    mesh->faces[mesh->face_count++] = pack_face(x, y, z, FACE_POS_Z, block_textures[v.type][FACE_POS_Z]);
-
-                if(is_air(chunk, x, y, z - 1))
-                    mesh->faces[mesh->face_count++] = pack_face(x, y, z, FACE_NEG_Z, block_textures[v.type][FACE_NEG_Z]);
-            }
-}
-
-void init_block_textures(Renderer* r)
-{
-    TextureID fallback = get_texture(r, "data/dummy_texture.png");
-
-    for(int b = 0; b < VOXEL_COUNT; b++)
-    {
-        for(int f = 0; f < 6; f++)
+        if(e->type == PIPELINE_TYPE_GRAPHICS)
         {
-            block_textures[b][f] = fallback;
+            matches = shader_change_matches_spv(changed, e->graphics.vert_path)
+                      || shader_change_matches_spv(changed, e->graphics.frag_path);
         }
-    }
-
-    for(int b = 0; b < VOXEL_COUNT; b++)
-    {
-        for(int f = 0; f < 6; f++)
+        else
         {
-            const char* path = voxel_materials[b].face_tex[f];
+            matches = shader_change_matches_spv(changed, e->compute.path);
+        }
 
-            if(path)
-                block_textures[b][f] = get_texture(r, path);
+        if(matches)
+            e->dirty = true;
+    }
+}
+
+
+void rebuild_dirty_pipelines(Renderer* r)
+{
+    bool any_dirty = false;
+
+    for(int i = 0; i < PIPELINE_COUNT; i++)
+        if(render_pipelines.entries[i].dirty)
+            any_dirty = true;
+
+    if(!any_dirty)
+        return;
+
+    vkDeviceWaitIdle(r->device);
+
+    for(int i = 0; i < PIPELINE_COUNT; i++)
+    {
+        PipelineEntry* e = &render_pipelines.entries[i];
+
+        if(!e->dirty)
+            continue;
+
+        e->dirty = false;
+
+        vkDestroyPipeline(r->device, render_pipelines.pipelines[i], NULL);
+
+        if(e->type == PIPELINE_TYPE_GRAPHICS)
+        {
+            render_pipelines.pipelines[i] = create_graphics_pipeline(r, &e->graphics);
+        }
+        else
+        {
+            render_pipelines.pipelines[i] = create_compute_pipeline(r, e->compute.path);
+        }
+
+        printf("Pipeline %d hot reloaded\n", i);
+    }
+}
+
+
+static volatile bool shader_changed = false;
+static char          changed_shader[256];
+static void watch_cb(dmon_watch_id id, dmon_action action, const char* root, const char* filepath, const char* oldfilepath, void* user)
+{
+    if(action == DMON_ACTION_MODIFY || action == DMON_ACTION_CREATE)
+    {
+        if(strstr(filepath, ".slang"))
+        {
+            snprintf(changed_shader, sizeof(changed_shader), "%s", filepath);
+            shader_changed = true;
         }
     }
 }
-float terrain(float x, float z)
-{
-    return stb_perlin_fbm_noise3(x * 0.01f, 0.0f, z * 0.01f,
-                                 2.0f,  // lacunarity
-                                 0.5f,  // gain
-                                 6      // octaves
-    );
-}
 
-
-void build_debug_voxel_palette(Chunk* chunk)
-{
-    memset(chunk, 0, sizeof(*chunk));
-
-    int cols = 6;
-
-    for(int t = 1; t < VOXEL_COUNT; t++)
-    {
-        int x = (t % cols) * 2;
-        int z = (t / cols) * 2;
-
-        chunk->voxels[x][0][z].type = (VoxelType)t;
-    }
-}
 int main()
 {
+    current_pipeline_build = 0;
     VK_CHECK(volkInitialize());
     if(!is_instance_extension_supported("VK_KHR_wayland_surface"))
         glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
@@ -480,10 +243,9 @@ int main()
     glfwInit();
     const char* dev_exts[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME};
 
-    u32               glfw_ext_count   = 0;
-    const char**      glfw_exts        = glfwGetRequiredInstanceExtensions(&glfw_ext_count);
-    Renderer          renderer         = {0};
-    RendererPipelines render_pipelines = {0};
+    u32          glfw_ext_count = 0;
+    const char** glfw_exts      = glfwGetRequiredInstanceExtensions(&glfw_ext_count);
+    Renderer     renderer       = {0};
 
     {
         RendererDesc desc = {
@@ -522,23 +284,37 @@ int main()
 
 
         renderer_create(&renderer, &desc);
-        init_block_textures(&renderer);
-        GraphicsPipelineConfig cfg = pipeline_config_default();
-        cfg.vert_path              = "compiledshaders/triangle.vert.spv";
-        cfg.frag_path              = "compiledshaders/triangle.frag.spv";
-        cfg.color_attachment_count = 1;
-        cfg.color_formats          = &renderer.hdr_color[1].format;
+        {
+            GraphicsPipelineConfig cfg = pipeline_config_default();
+            cfg.vert_path              = "compiledshaders/triangle.vert.spv";
+            cfg.frag_path              = "compiledshaders/triangle.frag.spv";
+            cfg.color_attachment_count = 1;
+            cfg.color_formats          = &renderer.hdr_color[1].format;
+            cfg.depth_format           = renderer.depth[1].format;
+            cfg.depth_test_enable      = false;
+            cfg.depth_write_enable     = false;
+            cfg.depth_format           = renderer.depth[1].format;
+            cfg.polygon_mode           = VK_POLYGON_MODE_FILL;
 
-        cfg.depth_format = renderer.depth[1].format;
-        cfg.polygon_mode = VK_POLYGON_MODE_FILL;
 
-        render_pipelines.pipelines[TRIANGLE_PIPELINE] = create_graphics_pipeline(&renderer, &cfg);
-        render_pipelines.pipelines[POSTPROCESS_PIPELINE] =
-            create_compute_pipeline(&renderer, "compiledshaders/postprocess.comp.spv");
+            render_pipelines.pipelines[PIPELINE_TRIANGLE_TEST] = create_graphics_pipeline(&renderer, &cfg);
+        }
+        {
+            GraphicsPipelineConfig cfg = pipeline_config_default();
+            cfg.vert_path              = "compiledshaders/minimal_proc.vert.spv";
+            cfg.frag_path              = "compiledshaders/minimal_proc.frag.spv";
+            cfg.color_attachment_count = 1;
+            cfg.color_formats          = &renderer.hdr_color[1].format;
+            cfg.depth_test_enable      = false;
+            cfg.depth_write_enable     = false;
+            cfg.depth_format           = VK_FORMAT_UNDEFINED;
 
-        printf("graphics hdr %d      ", cfg.color_formats[0]);
-        printf(" color hdr %d      ", renderer.hdr_color[1].format);
-        printf(" original color hdr %d", VK_FORMAT_R16G16B16A16_SFLOAT);
+            /* raster state */
+            cfg.cull_mode                                   = VK_CULL_MODE_NONE;
+            render_pipelines.pipelines[PIPELINE_FULLSCREEN] = create_graphics_pipeline_cache(&renderer, &cfg);
+        }
+        render_pipelines.pipelines[PIPELINE_POSTPROCESS] =
+            create_compute_pipeline_cache(&renderer, "compiledshaders/postprocess.comp.spv");
     }
 
     BufferPool pool = {0};
@@ -570,8 +346,6 @@ int main()
     /* device address */
 
     Camera cam = {
-
-
         .position   = {11.0f, 3.3f, 8.6f},
         .yaw        = glm_rad(5.7f),
         .pitch      = glm_rad(0.0f),
@@ -587,77 +361,7 @@ int main()
     glfwSetInputMode(renderer.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
 
-    static Chunk           chunk            = {0};
-    static const VoxelType terrain_voxels[] = {STONE, SAND, GRASS, BEDROCK, OBSIDIAN};
-    if(voxel_debug)
-    {
-        build_debug_voxel_palette(&chunk);
-    }
-    else
-    {
-        for(int x = 0; x < CHUNK_SIZE; x++)
-            for(int z = 0; z < CHUNK_SIZE; z++)
-            {
-                float n = terrain(x, z);
-                n       = n * 0.5f + 0.5f;
-
-                int height = (int)(n * (CHUNK_SIZE - 1));
-                height     = glm_clamp(height, 1, CHUNK_SIZE - 1);
-
-                uint32_t r = squirrel_noise5(x + z * 1234, 1337) % ARRAY_COUNT(terrain_voxels);
-
-                VoxelType type = terrain_voxels[r];
-                for(int y = 0; y < height; y++)
-                {
-                    uint32_t r = squirrel_noise5(x + z * 1234, 1337) % ARRAY_COUNT(terrain_voxels);
-
-                    chunk.voxels[x][y][z].type = terrain_voxels[r];
-                }
-            }
-    }
-
-
-    ChunkMesh mesh;
-    mesh.faces = malloc(sizeof(PackedFace) * 100000);
-
-    build_chunk_mesh(&chunk, &mesh);
-
-    printf("voxel debug: face_count=%u\n", mesh.face_count);
-    for(uint32_t i = 0; i < mesh.face_count && i < 4; i++)
-    {
-        uint32_t data0 = mesh.faces[i].data0;
-        uint32_t x     = data0 & 255u;
-        uint32_t y     = (data0 >> 8) & 255u;
-        uint32_t z     = (data0 >> 16) & 4095u;
-        uint32_t face  = (data0 >> 28) & 7u;
-        printf("face[%u]: xyz=(%u,%u,%u) face=%u tex_id=%u\n", i, x, y, z, face, mesh.faces[i].data1);
-    }
-
-    BufferSlice face_slice = buffer_pool_alloc(&pool, sizeof(PackedFace) * mesh.face_count, 16);
-
-    PackedFace* cpu_faces = (PackedFace*)face_slice.mapped;
-
-    memcpy(cpu_faces, mesh.faces, sizeof(PackedFace) * mesh.face_count);
-
-    vmaFlushAllocation(renderer.vmaallocator, pool.allocation, face_slice.offset, sizeof(PackedFace) * mesh.face_count);
-
-    VkDeviceAddress face_ptr    = vkGetBufferDeviceAddress(renderer.device, &addrInfo) + face_slice.offset;
-    cpu_indirect[0].vertexCount = mesh.face_count * 6;
-    ;
-    cpu_indirect[0].instanceCount = 1;
-    cpu_indirect[0].firstVertex   = 0;
-    cpu_indirect[0].firstInstance = 0;
-
-    *cpu_count = 1;
-
-    /* flush */
-
-
-    vmaFlushAllocation(renderer.vmaallocator, pool.allocation, indirect_slice.offset, sizeof(VkDrawIndirectCommand));
-
-    vmaFlushAllocation(renderer.vmaallocator, pool.allocation, count_slice.offset, sizeof(uint32_t));
-
-    /* Push layout shared with shaders/triangle.slang
+    /* Push layout shared with older geometry shaders
          face_ptr=0, face_count=8, aspect=12, pad0=16, pad1=20, pad2=24, pad3=28,
          view_proj=32, texture_id=96, sampler_id=100 */
 
@@ -675,11 +379,23 @@ int main()
                   uint frame;
 
     );
+    dmon_init();
+    dmon_watch("shaders", watch_cb, DMON_WATCHFLAGS_RECURSIVE, NULL);
+
     uint32_t pp_frame_counter = 0;
     while(!glfwWindowShouldClose(renderer.window))
     {
+        if(shader_changed)
+        {
+            shader_changed = false;
 
+            system("./compileslang.sh");
+
+            mark_pipelines_dirty(changed_shader);
+        }
+	rebuild_dirty_pipelines(&renderer);
         frame_start(&renderer, &cam);
+
         VkCommandBuffer cmd        = renderer.frames[renderer.current_frame].cmdbuf;
         GpuProfiler*    frame_prof = &renderer.gpuprofiler[renderer.current_frame];
         vk_cmd_begin(cmd, false);
@@ -722,7 +438,7 @@ int main()
             .layerCount           = 1,
             .colorAttachmentCount = 1,
             .pColorAttachments    = &color,
-            .pDepthAttachment     = &depth,
+            //   .pDepthAttachment     = &depth,
         };
 
 
@@ -781,7 +497,7 @@ int main()
 
             GPU_SCOPE(frame_prof, cmd, "Main Pass", VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT)
             {
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, render_pipelines.pipelines[TRIANGLE_PIPELINE]);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, render_pipelines.pipelines[PIPELINE_FULLSCREEN]);
 
                 vk_cmd_set_viewport_scissor(cmd, renderer.swapchain.extent);
 
@@ -793,14 +509,10 @@ int main()
                 push.sampler_id = linear_sampler;
 
 
-                push.face_ptr   = face_ptr;
-                push.face_count = mesh.face_count;
-
                 glm_mat4_copy(cam.view_proj, push.view_proj);
 
                 vkCmdPushConstants(cmd, renderer.bindless_system.pipeline_layout, VK_SHADER_STAGE_ALL, 0, sizeof(Push), &push);
-
-                vkCmdDraw(cmd, mesh.face_count * 6, 1, 0, 0);
+                vkCmdDraw(cmd, 3, 1, 0, 0);
             }
 
             {
@@ -819,7 +531,7 @@ int main()
         {
 
 
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, render_pipelines.pipelines[POSTPROCESS_PIPELINE]);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, render_pipelines.pipelines[PIPELINE_POSTPROCESS]);
 
             PostPush pp_push        = {0};
             pp_push.src_texture_id  = renderer.hdr_color[renderer.swapchain.current_image].bindless_index;
