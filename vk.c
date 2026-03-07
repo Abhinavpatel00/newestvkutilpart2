@@ -1390,7 +1390,7 @@ void renderer_create(Renderer* r, RendererDesc* desc)
         Texture*          tex        = &r->textures[id];
         VkDeviceSize      image_size = w * h * 4;
         Buffer            staging;
-        create_buffer(r, image_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,  VMA_MEMORY_USAGE_AUTO_PREFER_HOST, &staging);
+        create_buffer(r, image_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_AUTO_PREFER_HOST, &staging);
 
         memcpy(staging.mapping, pixels, image_size);
         stbi_image_free(pixels);
@@ -1493,6 +1493,11 @@ void renderer_create(Renderer* r, RendererDesc* desc)
         ci.addressModeW     = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
         ci.borderColor      = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
         sampler_create(r, &ci, &table->samplers[SAMPLER_SHADOW]);
+    }
+    {
+        VkDeviceSize size = r->swapchain.extent.width * r->swapchain.extent.height * 4;  // RGBA8
+
+        create_buffer(r, size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_AUTO_PREFER_HOST, &r->readback_buffer);
     }
 }
 
@@ -2524,12 +2529,9 @@ bool create_buffer(Renderer* r, VkDeviceSize size, VkBufferUsageFlags usage, Vma
         .usage       = usage,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
     };
-VmaAllocationCreateInfo alloc_info = {
-    .usage = memory_usage,
-    .flags =
-        VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
-        VMA_ALLOCATION_CREATE_MAPPED_BIT
-};
+    VmaAllocationCreateInfo alloc_info = {.usage = memory_usage,
+                                          .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+                                                   | VMA_ALLOCATION_CREATE_MAPPED_BIT};
 
 
     if(vmaCreateBuffer(r->vmaallocator, &buffer_info, &alloc_info, &out->buffer, &out->allocation, NULL) != VK_SUCCESS)
@@ -2542,7 +2544,7 @@ VmaAllocationCreateInfo alloc_info = {
     VmaAllocationInfo info;
     vmaGetAllocationInfo(r->vmaallocator, out->allocation, &info);
 
-        out->mapping = info.pMappedData;
+    out->mapping = info.pMappedData;
 
     if(usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT)
     {
@@ -3060,4 +3062,44 @@ bool rt_resize(Renderer* r, RenderTarget* rt, uint32_t width, uint32_t height)
     rt_destroy(r, rt);
 
     return rt_create(r, rt, &spec);
+}
+
+
+void renderer_save_screenshot(Renderer* r)
+
+{
+    vkDeviceWaitIdle(r->device);
+
+    uint32_t width  = r->swapchain.extent.width;
+    uint32_t height = r->swapchain.extent.height;
+
+    uint8_t* pixels = r->readback_buffer.mapping;
+
+    stbi_write_png("screenshot.png", width, height, 4, pixels, width * 4);
+
+    printf("Screenshot saved\n");
+}
+
+
+void renderer_record_screenshot(Renderer* r, VkCommandBuffer cmd)
+{
+    uint32_t width  = r->swapchain.extent.width;
+    uint32_t height = r->swapchain.extent.height;
+
+
+    image_transition_swapchain(cmd, &r->swapchain, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+
+    VkBufferImageCopy region = {
+        .bufferOffset      = 0,
+        .bufferRowLength   = 0,
+        .bufferImageHeight = 0,
+
+        .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
+
+        .imageOffset = {0, 0, 0},
+        .imageExtent = {width, height, 1}};
+
+    vkCmdCopyImageToBuffer(cmd, r->swapchain.images[r->swapchain.current_image], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           r->readback_buffer.buffer, 1, &region);
 }

@@ -9,7 +9,7 @@
 #define CGLM_ALL_UNALIGNED
 #include "external/cglm/include/cglm/cglm.h"
 #include "external/cglm/include/cglm/types.h"
-
+#include "stb/stb_image_write.h"
 #include "vk_default.h"
 #ifdef Status
 #undef Status
@@ -93,6 +93,16 @@ typedef struct DefaultSamplerTable
 {
     SamplerID samplers[SAMPLER_COUNT];
 } DefaultSamplerTable;
+
+typedef struct Buffer
+{
+    VkBuffer        buffer;
+    VkDeviceSize    buffer_size;
+    VkDeviceAddress address;
+    uint8_t*        mapping;
+    VmaAllocation   allocation;
+} Buffer;
+
 
 
 typedef struct
@@ -371,7 +381,7 @@ typedef struct
     double      cpu_prev_frame;
     GpuProfiler gpuprofiler[MAX_FRAMES_IN_FLIGHT];
 
-
+  Buffer readback_buffer;
     InstanceContext  instance;
     VkPhysicalDevice physical_device;
     //warm data
@@ -404,8 +414,11 @@ typedef struct
     flow_id_pool        sampler_pool;
     DefaultSamplerTable default_samplers;
     Texture             textures[MAX_BINDLESS_TEXTURES];  // reference by textureid
-    VkSampler           samplers[MAX_BINDLESS_SAMPLERS];   // reference by samplerid
+    VkSampler           samplers[MAX_BINDLESS_SAMPLERS];  // reference by samplerid
     TextureID           dummy_texture;
+
+
+
 } Renderer;
 
 typedef struct BufferPool
@@ -757,16 +770,6 @@ static FORCE_INLINE void camera_build_proj_reverse_z_infinite(mat4 out_proj, Cam
     out_proj[3][2] = n;
     out_proj[3][3] = 0.0f;
 }
-
-
-typedef struct Buffer
-{
-    VkBuffer        buffer;
-    VkDeviceSize    buffer_size;
-    VkDeviceAddress address;
-    uint8_t*        mapping;
-    VmaAllocation   allocation;
-} Buffer;
 
 bool create_buffer(Renderer* r, VkDeviceSize size, VkBufferUsageFlags usage, VmaMemoryUsage memory_usage, Buffer* out);
 
@@ -1138,9 +1141,7 @@ static FLOW_INLINE void submit_frame(Renderer* r)
 }
 
 
-FORCE_INLINE bool sampler_create(Renderer* r,
-                           const VkSamplerCreateInfo* ci,
-                           uint32_t* out_sampler_id)
+FORCE_INLINE bool sampler_create(Renderer* r, const VkSamplerCreateInfo* ci, uint32_t* out_sampler_id)
 {
     if(!r || !ci || !out_sampler_id)
         return false;
@@ -1177,3 +1178,15 @@ FORCE_INLINE bool sampler_create(Renderer* r,
     vkUpdateDescriptorSets(r->device, 1, &write, 0, NULL);
     return true;
 }
+
+
+
+
+
+
+
+void renderer_record_screenshot(Renderer* r, VkCommandBuffer cmd);
+
+
+void renderer_save_screenshot(Renderer* r);
+

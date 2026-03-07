@@ -10,7 +10,6 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <vulkan/vulkan_core.h>
-#define STB_PERLIN_IMPLEMENTATION
 #include "stb/stb_perlin.h"
 #define VALIDATION true
 #define KB(x) ((x) * 1024ULL)
@@ -20,7 +19,8 @@
 // imp gpu validation shows false positives may be bacause of data races
 
 
-static bool voxel_debug = true;
+static bool voxel_debug     = true;
+static bool take_screenshot = true;
 typedef struct
 {
     float pos[3];
@@ -852,36 +852,11 @@ int main()
                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, renderer.swapchain.images[renderer.swapchain.current_image],
                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
 
-        VkBufferImageCopy region = {
-            .bufferOffset      = 0,
-            .bufferRowLength   = 0,
-            .bufferImageHeight = 0,
-
-            .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
-
-            .imageOffset = {0, 0, 0},
-
-            .imageExtent = {renderer.swapchain.extent.width,
-                            1,  // copy only the first row for debugging
-                            1}};
-        // for reading pixel image
-        image_transition_swapchain(renderer.frames[renderer.current_frame].cmdbuf, &renderer.swapchain,
-                                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_TRANSFER_BIT, 0);
-
-
-        Buffer readback;
-
-        create_buffer(&renderer, renderer.swapchain.extent.width * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                      VMA_MEMORY_USAGE_AUTO_PREFER_HOST, &readback);
-
-        vkCmdCopyImageToBuffer(cmd, renderer.swapchain.images[renderer.swapchain.current_image],
-
-
-                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.buffer, 1, &region);
-
-        uint8_t* data = readback.mapping;
-
-
+        if(take_screenshot)
+        {
+            renderer_record_screenshot(&renderer, cmd);
+            take_screenshot = false;
+        }
         image_transition_swapchain(renderer.frames[renderer.current_frame].cmdbuf, &renderer.swapchain,
                                    VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, 0);
 
@@ -891,12 +866,9 @@ int main()
 
         submit_frame(&renderer);
 
-
-
-
-        for(int i = 0; i < 8; i++)
+        if(take_screenshot)
         {
-            printf("%u %u %u\n", data[i * 4 + 0], data[i * 4 + 1], data[i * 4 + 2]);
+            renderer_save_screenshot(&renderer);
         }
     }
 
