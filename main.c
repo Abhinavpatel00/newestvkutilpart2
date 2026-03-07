@@ -80,28 +80,11 @@ uint32_t squirrel_noise5(int position, uint32_t seed)
 // Component = data
 // System = logic
 
+
 typedef struct
 {
-    uint16_t face_tex[6];
+    const char* face_tex[6];
 } VoxelMaterial;
-
-enum
-{
-    TEX_STONE,
-    TEX_GRASS_TOP,
-    TEX_GRASS_SIDE,
-    TEX_DIRT,
-
-    TEX_BRICKS,
-    TEX_COBBLESTONE,
-    TEX_SAND,
-    TEX_OAK_PLANKS,
-    TEX_BEDROCK,
-    TEX_DIAMOND_BLOCK,
-    TEX_OBSIDIAN,
-
-    TEX_COUNT
-};
 typedef enum
 {
     FACE_POS_X = 0,
@@ -127,30 +110,24 @@ typedef enum
     VOXEL_COUNT
 } VoxelType;
 
-
-
-VoxelMaterial voxel_materials[] = {
+VoxelMaterial voxel_materials[VOXEL_COUNT] = {
     [VOXEL_AIR] = {0},
 
-    [STONE] = {.face_tex = {TEX_STONE, TEX_STONE, TEX_STONE, TEX_STONE, TEX_STONE, TEX_STONE}},
+    [STONE] = {.face_tex = {"data/block/stone.png", "data/block/stone.png", "data/block/stone.png",
+                            "data/block/stone.png", "data/block/stone.png", "data/block/stone.png"}},
 
-    [GRASS] = {.face_tex = {TEX_GRASS_SIDE, TEX_GRASS_SIDE, TEX_GRASS_TOP, TEX_DIRT, TEX_GRASS_SIDE, TEX_GRASS_SIDE}},
+    [GRASS] = {.face_tex = {"data/block/grass_side.png", "data/block/grass_side.png", "data/block/grass_top.png",
+                            "data/block/dirt.png", "data/block/grass_side.png", "data/block/grass_side.png"}},
 
-    [BRICK] = {.face_tex = {TEX_BRICKS, TEX_BRICKS, TEX_BRICKS, TEX_BRICKS, TEX_BRICKS, TEX_BRICKS}},
+    [BRICK] = {.face_tex = {"data/block/bricks.png", "data/block/bricks.png", "data/block/bricks.png",
+                            "data/block/bricks.png", "data/block/bricks.png", "data/block/bricks.png"}},
 
-    [COBBLE] = {.face_tex = {TEX_COBBLESTONE, TEX_COBBLESTONE, TEX_COBBLESTONE, TEX_COBBLESTONE, TEX_COBBLESTONE, TEX_COBBLESTONE}},
+    [COBBLE] = {.face_tex = {"data/block/cobblestone.png", "data/block/cobblestone.png", "data/block/cobblestone.png",
+                             "data/block/cobblestone.png", "data/block/cobblestone.png", "data/block/cobblestone.png"}},
 
-    [SAND] = {.face_tex = {TEX_SAND, TEX_SAND, TEX_SAND, TEX_SAND, TEX_SAND, TEX_SAND}},
+    [SAND] = {.face_tex = {"data/block/sand.png", "data/block/sand.png", "data/block/sand.png", "data/block/sand.png",
+                           "data/block/sand.png", "data/block/sand.png"}}};
 
-    [PLANKS] = {.face_tex = {TEX_OAK_PLANKS, TEX_OAK_PLANKS, TEX_OAK_PLANKS, TEX_OAK_PLANKS, TEX_OAK_PLANKS, TEX_OAK_PLANKS}},
-
-    [BEDROCK] = {.face_tex = {TEX_BEDROCK, TEX_BEDROCK, TEX_BEDROCK, TEX_BEDROCK, TEX_BEDROCK, TEX_BEDROCK}},
-
-    [DIAMOND] = {.face_tex = {TEX_DIAMOND_BLOCK, TEX_DIAMOND_BLOCK, TEX_DIAMOND_BLOCK, TEX_DIAMOND_BLOCK,
-                              TEX_DIAMOND_BLOCK, TEX_DIAMOND_BLOCK}},
-
-    [OBSIDIAN] = {.face_tex = {TEX_OBSIDIAN, TEX_OBSIDIAN, TEX_OBSIDIAN, TEX_OBSIDIAN, TEX_OBSIDIAN, TEX_OBSIDIAN}},
-};
 typedef struct
 {
     uint32_t data0;
@@ -199,6 +176,33 @@ static inline bool is_air(Chunk* c, int x, int y, int z)
 
     return c->voxels[x][y][z].type == VOXEL_AIR;
 }
+typedef struct
+{
+    const char* path;
+    TextureID   id;
+} TextureCacheEntry;
+
+#define MAX_TEXTURES 512
+
+static TextureCacheEntry voxel_texture_cache[MAX_TEXTURES];
+uint32_t                 voxel_texture_cache_count = 0;
+
+TextureID get_texture(Renderer* r, const char* path)
+{
+    for(uint32_t i = 0; i < voxel_texture_cache_count; i++)
+    {
+        if(strcmp(voxel_texture_cache[i].path, path) == 0)
+            return voxel_texture_cache[i].id;
+    }
+
+    TextureID id = load_texture(r, path);
+
+    voxel_texture_cache[voxel_texture_cache_count++] = (TextureCacheEntry){.path = path, .id = id};
+
+    return id;
+}
+
+static TextureID block_textures[VOXEL_COUNT][6];
 void build_chunk_mesh(Chunk* chunk, ChunkMesh* mesh)
 {
     mesh->face_count = 0;
@@ -214,30 +218,43 @@ void build_chunk_mesh(Chunk* chunk, ChunkMesh* mesh)
 
                 if(is_air(chunk, x + 1, y, z))
                     mesh->faces[mesh->face_count++] =
-                        pack_face(x, y, z, FACE_POS_X, voxel_materials[v.type].face_tex[FACE_POS_X]);
+                        pack_face(x, y, z, FACE_POS_X, block_textures[v.type][FACE_POS_X]);
 
                 if(is_air(chunk, x - 1, y, z))
                     mesh->faces[mesh->face_count++] =
-                        pack_face(x, y, z, FACE_NEG_X, voxel_materials[v.type].face_tex[FACE_NEG_X]);
+                        pack_face(x, y, z, FACE_NEG_X, block_textures[v.type][FACE_NEG_X]);
 
                 if(is_air(chunk, x, y + 1, z))
                     mesh->faces[mesh->face_count++] =
-                        pack_face(x, y, z, FACE_POS_Y, voxel_materials[v.type].face_tex[FACE_POS_Y]);
+                        pack_face(x, y, z, FACE_POS_Y, block_textures[v.type][FACE_POS_Y]);
 
                 if(is_air(chunk, x, y - 1, z))
                     mesh->faces[mesh->face_count++] =
-                        pack_face(x, y, z, FACE_NEG_Y, voxel_materials[v.type].face_tex[FACE_NEG_Y]);
+                        pack_face(x, y, z, FACE_NEG_Y, block_textures[v.type][FACE_NEG_Y]);
 
                 if(is_air(chunk, x, y, z + 1))
                     mesh->faces[mesh->face_count++] =
-                        pack_face(x, y, z, FACE_POS_Z, voxel_materials[v.type].face_tex[FACE_POS_Z]);
+                        pack_face(x, y, z, FACE_POS_Z, block_textures[v.type][FACE_POS_Z]);
 
                 if(is_air(chunk, x, y, z - 1))
                     mesh->faces[mesh->face_count++] =
-                        pack_face(x, y, z, FACE_NEG_Z, voxel_materials[v.type].face_tex[FACE_NEG_Z]);
+                        pack_face(x, y, z, FACE_NEG_Z, block_textures[v.type][FACE_NEG_Z]);
             }
 }
 
+void init_block_textures(Renderer* r)
+{
+    for(int b = 0; b < VOXEL_COUNT; b++)
+    {
+        for(int f = 0; f < 6; f++)
+        {
+            const char* path = voxel_materials[b].face_tex[f];
+
+            if(path)
+                block_textures[b][f] = get_texture(r, path);
+        }
+    }
+}
 float terrain(float x, float z)
 {
     return stb_perlin_fbm_noise3(x * 0.01f, 0.0f, z * 0.01f,
@@ -297,7 +314,7 @@ int main()
 
 
         renderer_create(&renderer, &desc);
-
+init_block_textures(&renderer);
         GraphicsPipelineConfig cfg = pipeline_config_default();
         cfg.vert_path              = "compiledshaders/triangle.vert.spv";
         cfg.frag_path              = "compiledshaders/triangle.frag.spv";
@@ -324,29 +341,6 @@ int main()
 
     VkBufferDeviceAddressInfo addrInfo = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = pool.buffer};
     TextureID        tex_id = load_texture(&renderer, "/home/lk/myprojects/flowgame/data/PNG/Tiles/greystone.png");
-    static TextureID voxel_textures[TEX_COUNT];
-
-    voxel_textures[TEX_STONE] = load_texture(&renderer, "/home/lk/myprojects/flowgame/data/PNG/Tiles/greystone.png");
-    voxel_textures[TEX_GRASS_TOP] = load_texture(&renderer, "/home/lk/myprojects/flowgame/data/PNG/Tiles/grass_top.png");
-
-    voxel_textures[TEX_GRASS_SIDE] = load_texture(&renderer, "/home/lk/myprojects/flowgame/data/PNG/Tiles/gravel_dirt.png");
-
-    voxel_textures[TEX_DIRT] = load_texture(&renderer, "/home/lk/myprojects/flowgame/data/PNG/Tiles/dirt.png");
-    voxel_textures[TEX_BRICKS] = load_texture(&renderer, "data/voxeltextures/GoodVibes/minecraft/textures/block/bricks.png");
-
-    voxel_textures[TEX_COBBLESTONE] =
-        load_texture(&renderer, "data/voxeltextures/GoodVibes/minecraft/textures/block/cobblestone.png");
-
-    voxel_textures[TEX_SAND] = load_texture(&renderer, "data/voxeltextures/GoodVibes/minecraft/textures/block/sand.png");
-
-    voxel_textures[TEX_OAK_PLANKS] = load_texture(&renderer, "data/voxeltextures/GoodVibes/minecraft/textures/block/oak_planks.png");
-
-    voxel_textures[TEX_BEDROCK] = load_texture(&renderer, "data/voxeltextures/GoodVibes/minecraft/textures/block/bedrock.png");
-
-    voxel_textures[TEX_DIAMOND_BLOCK] =
-        load_texture(&renderer, "data/voxeltextures/GoodVibes/minecraft/textures/block/diamond_block.png");
-
-    voxel_textures[TEX_OBSIDIAN] = load_texture(&renderer, "data/voxeltextures/GoodVibes/minecraft/textures/block/obsidian.png");
     SamplerCreateDesc desc = {.mag_filter = VK_FILTER_LINEAR,
                               .min_filter = VK_FILTER_LINEAR,
 
@@ -441,15 +435,6 @@ int main()
     mesh.faces = malloc(sizeof(PackedFace) * 100000);
 
     build_chunk_mesh(&chunk, &mesh);
-
-    for(uint32_t i = 0; i < mesh.face_count; i++)
-    {
-        uint32_t tex_slot = mesh.faces[i].data1;
-        if(tex_slot < TEX_COUNT)
-        {
-            mesh.faces[i].data1 = voxel_textures[tex_slot];
-        }
-    }
 
     printf("voxel debug: face_count=%u\n", mesh.face_count);
     for(uint32_t i = 0; i < mesh.face_count && i < 4; i++)
