@@ -20,6 +20,7 @@
 #define PAD(name, size) uint8_t name[(size)]
 // imp gpu validation shows false positives may be bacause of data races
 
+static const VoxelType terrain_voxels[] = {CYAN_WOOL};
 #define DMON_IMPL
 #include "external/dmon/dmon.h"
 static bool voxel_debug     = false;
@@ -232,6 +233,179 @@ static void watch_cb(dmon_watch_id id, dmon_action action, const char* root, con
     }
 }
 
+
+typedef struct
+{
+    uint32_t data0;
+    uint32_t data1;
+} PackedFace;
+
+typedef struct
+{
+    VoxelType type;
+} Voxel;
+
+typedef struct
+{
+    const char* path;
+    TextureID   id;
+} TextureCacheEntry;
+
+
+#define CHUNK_SIZE 128
+
+typedef struct
+{
+    Voxel voxels[CHUNK_SIZE][CHUNK_SIZE][CHUNK_SIZE];
+} Chunk;
+typedef struct
+{
+    PackedFace* faces;
+    uint32_t    face_count;
+} ChunkMesh;
+
+#define MAX_TEXTURES 2222
+
+static TextureCacheEntry voxel_texture_cache[MAX_TEXTURES];
+uint32_t                 voxel_texture_cache_count = 0;
+
+static TextureID block_textures[VOXEL_COUNT][6];
+TextureID        get_texture(Renderer* r, const char* path)
+{
+    for(uint32_t i = 0; i < voxel_texture_cache_count; i++)
+    {
+        if(strcmp(voxel_texture_cache[i].path, path) == 0)
+            return voxel_texture_cache[i].id;
+    }
+
+    TextureID id = load_texture(r, path);
+
+    voxel_texture_cache[voxel_texture_cache_count++] = (TextureCacheEntry){.path = path, .id = id};
+
+    return id;
+}
+
+void init_block_textures(Renderer* r)
+{
+    TextureID fallback = get_texture(r, "data/dummy_texture.png");
+
+    for(int b = 0; b < VOXEL_COUNT; b++)
+    {
+        for(int f = 0; f < 6; f++)
+        {
+            block_textures[b][f] = fallback;
+        }
+    }
+
+    for(int b = 0; b < VOXEL_COUNT; b++)
+    {
+        for(int f = 0; f < 6; f++)
+        {
+            const char* path = voxel_materials[b].face_tex[f];
+
+            if(path)
+                block_textures[b][f] = get_texture(r, path);
+        }
+    }
+}
+
+void build_debug_voxel_palette(Chunk* chunk)
+{
+    memset(chunk, 0, sizeof(*chunk));
+
+    int cols = 6;
+
+    for(int t = 1; t < VOXEL_COUNT; t++)
+    {
+        int x = (t % cols) * 2;
+        int z = (t / cols) * 2;
+
+        chunk->voxels[x][0][z].type = (VoxelType)t;
+    }
+}
+
+float terrain(float x, float z)
+{
+    return stb_perlin_fbm_noise3(x * 0.01f, 0.0f, z * 0.01f,
+                                 2.0f,  // lacunarity
+                                 0.5f,  // gain
+                                 6      // octaves
+    );
+}
+uint32_t squirrel_noise5(int position, uint32_t seed)
+{
+    const uint32_t BIT_NOISE1 = 0xd2a80a3f;
+    const uint32_t BIT_NOISE2 = 0xa884f197;
+    const uint32_t BIT_NOISE3 = 0x6c736f4b;
+
+    uint32_t mangled = position;
+    mangled *= BIT_NOISE1;
+    mangled += seed;
+    mangled ^= (mangled >> 8);
+    mangled += BIT_NOISE2;
+    mangled ^= (mangled << 8);
+    mangled *= BIT_NOISE3;
+    mangled ^= (mangled >> 8);
+
+    return mangled;
+}
+static inline bool is_air(Chunk* c, int x, int y, int z)
+{
+    if(x < 0 || y < 0 || z < 0)
+        return true;
+    if(x >= CHUNK_SIZE)
+        return true;
+    if(y >= CHUNK_SIZE)
+        return true;
+    if(z >= CHUNK_SIZE)
+        return true;
+
+    return c->voxels[x][y][z].type == VOXEL_AIR;
+}
+
+
+static inline PackedFace pack_face(uint32_t x, uint32_t y, uint32_t z, uint32_t face, uint32_t tex)
+{
+    PackedFace f;
+
+    f.data0 = (x & 255) | ((y & 255) << 8) | ((z & 4095) << 16) | ((face & 7) << 28);
+
+    f.data1 = tex;
+
+    return f;
+}
+void build_chunk_mesh(Chunk* chunk, ChunkMesh* mesh)
+{
+    mesh->face_count = 0;
+
+    for(int x = 0; x < CHUNK_SIZE; x++)
+        for(int y = 0; y < CHUNK_SIZE; y++)
+            for(int z = 0; z < CHUNK_SIZE; z++)
+            {
+                Voxel v = chunk->voxels[x][y][z];
+
+                if(v.type == VOXEL_AIR)
+                    continue;
+
+                if(is_air(chunk, x + 1, y, z))
+                    mesh->faces[mesh->face_count++] = pack_face(x, y, z, FACE_POS_X, block_textures[v.type][FACE_POS_X]);
+
+                if(is_air(chunk, x - 1, y, z))
+                    mesh->faces[mesh->face_count++] = pack_face(x, y, z, FACE_NEG_X, block_textures[v.type][FACE_NEG_X]);
+
+                if(is_air(chunk, x, y + 1, z))
+                    mesh->faces[mesh->face_count++] = pack_face(x, y, z, FACE_POS_Y, block_textures[v.type][FACE_POS_Y]);
+
+                if(is_air(chunk, x, y - 1, z))
+                    mesh->faces[mesh->face_count++] = pack_face(x, y, z, FACE_NEG_Y, block_textures[v.type][FACE_NEG_Y]);
+
+                if(is_air(chunk, x, y, z + 1))
+                    mesh->faces[mesh->face_count++] = pack_face(x, y, z, FACE_POS_Z, block_textures[v.type][FACE_POS_Z]);
+
+                if(is_air(chunk, x, y, z - 1))
+                    mesh->faces[mesh->face_count++] = pack_face(x, y, z, FACE_NEG_Z, block_textures[v.type][FACE_NEG_Z]);
+            }
+}
 int main()
 {
     current_pipeline_build = 0;
@@ -282,8 +456,8 @@ int main()
 
         };
 
-
         renderer_create(&renderer, &desc);
+        init_block_textures(&renderer);
         {
             GraphicsPipelineConfig cfg = pipeline_config_default();
             cfg.vert_path              = "compiledshaders/triangle.vert.spv";
@@ -291,26 +465,18 @@ int main()
             cfg.color_attachment_count = 1;
             cfg.color_formats          = &renderer.hdr_color[1].format;
             cfg.depth_format           = renderer.depth[1].format;
-            cfg.depth_test_enable      = false;
-            cfg.depth_write_enable     = false;
-            cfg.depth_format           = renderer.depth[1].format;
             cfg.polygon_mode           = VK_POLYGON_MODE_FILL;
-
 
             render_pipelines.pipelines[PIPELINE_TRIANGLE_TEST] = create_graphics_pipeline(&renderer, &cfg);
         }
         {
-            GraphicsPipelineConfig cfg = pipeline_config_default();
-            cfg.vert_path              = "compiledshaders/minimal_proc.vert.spv";
-            cfg.frag_path              = "compiledshaders/minimal_proc.frag.spv";
-            cfg.color_attachment_count = 1;
-            cfg.color_formats          = &renderer.hdr_color[1].format;
-            cfg.depth_test_enable      = false;
-            cfg.depth_write_enable     = false;
-            cfg.depth_format           = VK_FORMAT_UNDEFINED;
-
-            /* raster state */
-            cfg.cull_mode                                   = VK_CULL_MODE_NONE;
+            GraphicsPipelineConfig cfg                      = pipeline_config_default();
+            cfg.vert_path                                   = "compiledshaders/minimal_proc.vert.spv";
+            cfg.frag_path                                   = "compiledshaders/minimal_proc.frag.spv";
+            cfg.color_attachment_count                      = 1;
+            cfg.color_formats                               = &renderer.hdr_color[1].format;
+            cfg.depth_test_enable                           = false;
+            cfg.depth_write_enable                          = false;
             render_pipelines.pipelines[PIPELINE_FULLSCREEN] = create_graphics_pipeline_cache(&renderer, &cfg);
         }
         render_pipelines.pipelines[PIPELINE_POSTPROCESS] =
@@ -334,13 +500,77 @@ int main()
                                 .mipmap_mode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
                                 .max_lod     = 1.0f};
 
-    SamplerID linear_sampler = create_sampler(&renderer, &desc);
-
+    SamplerID   linear_sampler = create_sampler(&renderer, &desc);
     BufferSlice indirect_slice = buffer_pool_alloc(&pool, sizeof(VkDrawIndirectCommand), 16);
     BufferSlice count_slice    = buffer_pool_alloc(&pool, sizeof(uint32_t), 4);
 
     VkDrawIndirectCommand* cpu_indirect = (VkDrawIndirectCommand*)indirect_slice.mapped;
     uint32_t*              cpu_count    = (uint32_t*)count_slice.mapped;
+
+
+    static Chunk chunk = {0};
+
+
+    if(voxel_debug)
+    {
+        build_debug_voxel_palette(&chunk);
+    }
+    else
+    {
+        for(int x = 0; x < CHUNK_SIZE; x++)
+            for(int z = 0; z < CHUNK_SIZE; z++)
+            {
+                float n = terrain(x, z);
+                n       = n * 0.5f + 0.5f;
+
+                int height = (int)(n * (CHUNK_SIZE - 1));
+                height     = glm_clamp(height, 1, CHUNK_SIZE - 1);
+
+                uint32_t r = squirrel_noise5(x + z * 1234, 1337) % ARRAY_COUNT(terrain_voxels);
+
+                VoxelType type = terrain_voxels[r];
+                for(int y = 0; y < height; y++)
+                {
+                    uint32_t r = squirrel_noise5(x + z * 1234, 1337) % ARRAY_COUNT(terrain_voxels);
+
+                    chunk.voxels[x][y][z].type = terrain_voxels[r];
+                }
+            }
+    }
+
+    ChunkMesh mesh;
+    mesh.faces = malloc(sizeof(PackedFace) * 100000);
+
+    build_chunk_mesh(&chunk, &mesh);
+
+    printf("voxel debug: face_count=%u\n", mesh.face_count);
+    for(uint32_t i = 0; i < mesh.face_count && i < 4; i++)
+    {
+        uint32_t data0 = mesh.faces[i].data0;
+        uint32_t x     = data0 & 255u;
+        uint32_t y     = (data0 >> 8) & 255u;
+        uint32_t z     = (data0 >> 16) & 4095u;
+        uint32_t face  = (data0 >> 28) & 7u;
+        printf("face[%u]: xyz=(%u,%u,%u) face=%u tex_id=%u\n", i, x, y, z, face, mesh.faces[i].data1);
+    }
+
+    BufferSlice face_slice = buffer_pool_alloc(&pool, sizeof(PackedFace) * mesh.face_count, 16);
+
+    PackedFace* cpu_faces = (PackedFace*)face_slice.mapped;
+
+    memcpy(cpu_faces, mesh.faces, sizeof(PackedFace) * mesh.face_count);
+
+    vmaFlushAllocation(renderer.vmaallocator, pool.allocation, face_slice.offset, sizeof(PackedFace) * mesh.face_count);
+
+    VkDeviceAddress face_ptr      = vkGetBufferDeviceAddress(renderer.device, &addrInfo) + face_slice.offset;
+    cpu_indirect[0].vertexCount   = mesh.face_count * 6;
+    cpu_indirect[0].instanceCount = 1;
+    cpu_indirect[0].firstVertex   = 0;
+    cpu_indirect[0].firstInstance = 0;
+
+    *cpu_count = 1;
+
+
     /* indirect draw command */
 
     /* device address */
@@ -393,7 +623,7 @@ int main()
 
             mark_pipelines_dirty(changed_shader);
         }
-	rebuild_dirty_pipelines(&renderer);
+        rebuild_dirty_pipelines(&renderer);
         frame_start(&renderer, &cam);
 
         VkCommandBuffer cmd        = renderer.frames[renderer.current_frame].cmdbuf;
@@ -438,7 +668,7 @@ int main()
             .layerCount           = 1,
             .colorAttachmentCount = 1,
             .pColorAttachments    = &color,
-            //   .pDepthAttachment     = &depth,
+            .pDepthAttachment     = &depth,
         };
 
 
@@ -497,14 +727,14 @@ int main()
 
             GPU_SCOPE(frame_prof, cmd, "Main Pass", VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT)
             {
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, render_pipelines.pipelines[PIPELINE_FULLSCREEN]);
-
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, render_pipelines.pipelines[PIPELINE_TRIANGLE_TEST]);
                 vk_cmd_set_viewport_scissor(cmd, renderer.swapchain.extent);
 
                 Push push = {0};
 
-                push.aspect = (float)renderer.swapchain.extent.width / (float)renderer.swapchain.extent.height;
-
+                push.aspect     = (float)renderer.swapchain.extent.width / (float)renderer.swapchain.extent.height;
+                push.face_ptr   = face_ptr;
+                push.face_count = mesh.face_count;
                 push.texture_id = tex_id;
                 push.sampler_id = linear_sampler;
 
@@ -512,7 +742,9 @@ int main()
                 glm_mat4_copy(cam.view_proj, push.view_proj);
 
                 vkCmdPushConstants(cmd, renderer.bindless_system.pipeline_layout, VK_SHADER_STAGE_ALL, 0, sizeof(Push), &push);
-                vkCmdDraw(cmd, 3, 1, 0, 0);
+
+                vkCmdDrawIndirectCount(cmd, indirect_slice.buffer, indirect_slice.offset, count_slice.buffer,
+                                       count_slice.offset, 1024, sizeof(VkDrawIndirectCommand));
             }
 
             {

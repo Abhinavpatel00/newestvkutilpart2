@@ -153,7 +153,6 @@ typedef enum
 // -Y → bottom
 //
 
-static const VoxelType terrain_voxels[] = {DIRT};
 // clang-format off
 
 #define CUBE(tex) {tex, tex, tex, tex, tex, tex}

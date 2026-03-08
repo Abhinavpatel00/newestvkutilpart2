@@ -104,7 +104,6 @@ typedef struct Buffer
 } Buffer;
 
 
-
 typedef struct
 {
     VkPhysicalDevice physical;
@@ -381,7 +380,7 @@ typedef struct
     double      cpu_prev_frame;
     GpuProfiler gpuprofiler[MAX_FRAMES_IN_FLIGHT];
 
-  Buffer readback_buffer;
+    Buffer           readback_buffer;
     InstanceContext  instance;
     VkPhysicalDevice physical_device;
     //warm data
@@ -416,7 +415,6 @@ typedef struct
     Texture             textures[MAX_BINDLESS_TEXTURES];  // reference by textureid
     VkSampler           samplers[MAX_BINDLESS_SAMPLERS];  // reference by samplerid
     TextureID           dummy_texture;
-
 
 
 } Renderer;
@@ -926,8 +924,25 @@ static FLOW_INLINE void frame_start(Renderer* renderer, Camera* cam)
             cam->mouse_captured = false;
         }
     }
+    {
+        static bool up_prev   = false;
+        static bool down_prev = false;
 
-    /* ---------------- camera ---------------- */
+        bool up_now   = glfwGetKey(renderer->window, GLFW_KEY_EQUAL) == GLFW_PRESS;  // +
+        bool down_now = glfwGetKey(renderer->window, GLFW_KEY_MINUS) == GLFW_PRESS;  // -
+
+        if(up_now && !up_prev)
+            cam->move_speed += 1.0f;
+
+        if(down_now && !down_prev)
+            cam->move_speed -= 1.0f;
+
+        if(cam->move_speed < 0.1f)
+            cam->move_speed = 0.1f;
+
+        up_prev   = up_now;
+        down_prev = down_now;
+    } /* ---------------- camera ---------------- */
 
     if(cam->mouse_captured)
     {
@@ -1180,13 +1195,7 @@ FORCE_INLINE bool sampler_create(Renderer* r, const VkSamplerCreateInfo* ci, uin
 }
 
 
-
-
-
-
-
 void renderer_record_screenshot(Renderer* r, VkCommandBuffer cmd);
 
 
 void renderer_save_screenshot(Renderer* r);
-
